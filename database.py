@@ -11,6 +11,9 @@ else:
     _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(_APP_DIR, "investments.db")
 
+# Текущая версия схемы базы данных
+CURRENT_DB_VERSION = 1
+
 _TYPE_MAP = {
     'stock': 'Мос.Биржа',
     'crypto': 'Крипто биржа',
@@ -258,20 +261,6 @@ def init_db():
             "INSERT OR IGNORE INTO currencies (id, code, name) VALUES (?, ?, ?)", c
         )
 
-    # ─── 0b. Реестр тикеров ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ticker_names (
-            ticker TEXT PRIMARY KEY,
-            name TEXT NOT NULL DEFAULT ''
-        )
-    """)
-    # Миграция: заполнить из существующих активов
-    cursor.execute("""
-        INSERT OR IGNORE INTO ticker_names (ticker, name)
-        SELECT ticker, name FROM assets
-        WHERE ticker != '' AND name IS NOT NULL AND name != ''
-    """)
-
     # ─── 1. Таблица счетов ───
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS accounts (
@@ -306,6 +295,23 @@ def init_db():
             FOREIGN KEY (currency_id) REFERENCES currencies(id)
         )
     """)
+
+    # ─── 0b. Реестр тикеров ───
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ticker_names (
+            ticker TEXT PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    # Миграция: заполнить из существующих активов
+    try:
+        cursor.execute("""
+            INSERT OR IGNORE INTO ticker_names (ticker, name)
+            SELECT ticker, name FROM assets
+            WHERE ticker != '' AND name IS NOT NULL AND name != ''
+        """)
+    except Exception:
+        pass
 
     # ─── 3. Таблица покупок (лог каждой докупки) ───
     cursor.execute("""
@@ -409,8 +415,69 @@ def init_db():
         )
     """)
 
+    # ─── 9. Таблица версии схемы БД ───
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS db_version (
+            version INTEGER
+        )
+    """)
+    cursor.execute("SELECT COUNT(*) as cnt FROM db_version")
+    if cursor.fetchone()["cnt"] == 0:
+        cursor.execute("INSERT INTO db_version VALUES (?)", (CURRENT_DB_VERSION,))
+
     conn.commit()
     conn.close()
+
+
+# ================================================================
+#  Migrations
+# ================================================================
+
+def migrate_db():
+    """Проверить версию схемы БД и применить миграции при необходимости."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Проверить наличие таблицы db_version
+    cursor.execute("""
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name='db_version'
+    """)
+    if not cursor.fetchone():
+        # Таблицы нет — создаём (база без версии)
+        cursor.execute("CREATE TABLE db_version (version INTEGER)")
+        cursor.execute("INSERT INTO db_version VALUES (?)", (CURRENT_DB_VERSION,))
+        conn.commit()
+        conn.close()
+        print(f"[migrate_db] Схема инициализирована на версии {CURRENT_DB_VERSION}")
+        return
+
+    cursor.execute("SELECT version FROM db_version LIMIT 1")
+    row = cursor.fetchone()
+    current = row["version"] if row else 0
+
+    if current >= CURRENT_DB_VERSION:
+        conn.close()
+        print(f"[migrate_db] Версия БД актуальна: {current}")
+        return
+
+    print(f"[migrate_db] Текущая версия БД: {current}, целевая: {CURRENT_DB_VERSION}")
+
+    # ─── Миграции (применяются по очереди) ───
+    # Пока миграций нет. Заготовка для будущего:
+    #
+    # if current < 2:
+    #     cursor.execute("ALTER TABLE ... ADD COLUMN ...")
+    #     cursor.execute("UPDATE db_version SET version = 2")
+    #     current = 2
+    #     print("[migrate_db] Применена миграция до версии 2")
+    #
+    # if current < 3:
+    #     ...
+
+    conn.commit()
+    conn.close()
+    print(f"[migrate_db] Миграции завершены. Версия: {current}")
 
 
 # ================================================================
