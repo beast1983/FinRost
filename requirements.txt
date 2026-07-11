@@ -1,0 +1,5 @@
+matplotlib>=3.11.0
+tkcalendar>=1.5.0
+babel>=2.0
+requests>=2.32.5
+ttkbootstrap>=1.10

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# База данных и конфиг (личные данные)
+*.db
+app_config.json
+
+# Архивы / резервные копии
+Archiv/*.zip
+
+# Примеры (могут содержать личные данные)
+Example/
+
+# Бинарники (больше не используются)
+Rar.exe
+UnRAR.exe
+UnRar.exe
+
+# PyInstaller
+*.spec
+build/
+dist/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Прочее
+*.log
