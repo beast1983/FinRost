@@ -765,9 +765,13 @@ class AssetsView(tb.Frame):
             tx_date = date_entry.get_date().strftime("%Y-%m-%d")
             notes = notes_var.get().strip()
 
-            success, msg = credit_coupon_or_dividend(
-                account_id, amount, kind_var.get(), notes, ticker=ticker, tx_date=tx_date
-            )
+            try:
+                success, msg = credit_coupon_or_dividend(
+                    account_id, amount, kind_var.get(), notes, ticker=ticker, tx_date=tx_date
+                )
+            except Exception as e:
+                messagebox.showerror("Ошибка базы данных", f"Не удалось сохранить:\n{e}")
+                return
             if success:
                 messagebox.showinfo("Успех", msg)
                 dialog.destroy()

@@ -38,9 +38,14 @@ def get_db_path():
 
 def get_connection():
     """Подключение к базе данных."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -116,19 +121,27 @@ def get_currency_id(code):
 #  Реестр тикеров
 # ================================================================
 
-def upsert_ticker_name(ticker, name):
-    """Добавить или обновить запись в реестре тикеров."""
+def upsert_ticker_name(ticker, name, cursor=None):
+    """Добавить или обновить запись в реестре тикеров.
+
+    Если передан cursor — работает в рамках транзакции вызывающего
+    (без открытия нового соединения и без commit/close). Иначе открывает
+    собственное подключение.
+    """
     if not ticker or not name:
         return
-    conn = get_connection()
-    cursor = conn.cursor()
+    own_conn = cursor is None
+    if own_conn:
+        conn = get_connection()
+        cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO ticker_names (ticker, name) VALUES (?, ?)
         ON CONFLICT(ticker) DO UPDATE SET name = ?
         WHERE excluded.name != '' AND ticker_names.name = ''
     """, (ticker.strip().upper(), name.strip(), name.strip()))
-    conn.commit()
-    conn.close()
+    if own_conn:
+        conn.commit()
+        conn.close()
 
 
 def import_ticker_names(rows):
@@ -771,7 +784,7 @@ def add_asset(ticker, asset_type, quantity, price, purchase_date, account_id=Non
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Регистрируем тикер в справочнике
-    upsert_ticker_name(ticker, name)
+    upsert_ticker_name(ticker, name, cursor=cursor)
 
     if asset_type == "облигация":
         purchase_sum = quantity * price * 1000 / 100
@@ -899,7 +912,7 @@ def update_asset(asset_id, ticker, asset_type, quantity, price, purchase_date,
     cursor = conn.cursor()
     price = round_price(price)
     # При редактировании пополняем реестр тикеров (защита от пустых значений внутри функции)
-    upsert_ticker_name(ticker, name)
+    upsert_ticker_name(ticker, name, cursor=cursor)
     cursor.execute("""
         UPDATE assets
         SET ticker = ?, name = ?, asset_type = ?, quantity = ?, avg_price = ?,
@@ -973,7 +986,7 @@ def sell_asset(asset_id, sell_price, sell_date, quantity=None):
     cursor.execute("UPDATE snapshot_assets SET asset_id = NULL WHERE asset_id = ?", (asset_id,))
 
     # Сохраняем имя тикера в реестре перед удалением
-    upsert_ticker_name(asset["ticker"], asset["name"] or "")
+    upsert_ticker_name(asset["ticker"], asset["name"] or "", cursor=cursor)
 
     remaining_qty = asset_quantity - sold_qty
     if remaining_qty <= 0.000001:
@@ -1033,7 +1046,7 @@ def buy_more_asset(asset_id, add_qty, buy_price, buy_date, account_id=None):
         purchase_sum = add_qty * buy_price
 
     # Регистрируем тикер в справочнике
-    upsert_ticker_name(asset["ticker"], asset["name"] or "")
+    upsert_ticker_name(asset["ticker"], asset["name"] or "", cursor=cursor)
 
     acc_currency_id = asset_currency_id
     if effective_account_id is not None:
@@ -1146,31 +1159,35 @@ def credit_coupon_or_dividend(account_id, amount, kind='купон', notes='', t
     """Зачисление купона или дивиденда."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT balance, currency_id FROM accounts WHERE id = ?", (account_id,)
-    )
-    row = cursor.fetchone()
-    if not row:
+    try:
+        cursor.execute(
+            "SELECT balance, currency_id FROM accounts WHERE id = ?", (account_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False, "Счёт не найден"
+        old_bal = row["balance"]
+        cur_id = row["currency_id"]
+        currency_code = get_currency_code(cur_id)
+        new_bal = round_price(old_bal + amount)
+        cursor.execute("UPDATE accounts SET balance = ? WHERE id = ?", (new_bal, account_id))
+
+        # Регистрируем тикер в справочнике (если есть имя у актива)
+        if ticker:
+            cursor.execute("SELECT name FROM assets WHERE ticker = ? AND name IS NOT NULL AND name != '' LIMIT 1", (ticker.strip().upper(),))
+            asset_row = cursor.fetchone()
+            if asset_row:
+                upsert_ticker_name(ticker, asset_row["name"], cursor=cursor)
+
+        tx_type = kind
+        add_transaction_internal(cursor, tx_type, account_id, amount, cur_id, ticker=ticker, notes=notes, tx_date=tx_date)
+        conn.commit()
+        return True, f"{kind.capitalize()} начислен: {amount:.2f} {currency_code}. Новый баланс: {new_bal:.2f}"
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        return False, "Счёт не найден"
-    old_bal = row["balance"]
-    cur_id = row["currency_id"]
-    currency_code = get_currency_code(cur_id)
-    new_bal = round_price(old_bal + amount)
-    cursor.execute("UPDATE accounts SET balance = ? WHERE id = ?", (new_bal, account_id))
-
-    # Регистрируем тикер в справочнике (если есть имя у актива)
-    if ticker:
-        cursor.execute("SELECT name FROM assets WHERE ticker = ? AND name IS NOT NULL AND name != '' LIMIT 1", (ticker.strip().upper(),))
-        asset_row = cursor.fetchone()
-        if asset_row:
-            upsert_ticker_name(ticker, asset_row["name"])
-
-    tx_type = kind
-    add_transaction_internal(cursor, tx_type, account_id, amount, cur_id, ticker=ticker, notes=notes, tx_date=tx_date)
-    conn.commit()
-    conn.close()
-    return True, f"{kind.capitalize()} начислен: {amount:.2f} {currency_code}. Новый баланс: {new_bal:.2f}"
 
 
 # ================================================================
@@ -1789,48 +1806,53 @@ def import_incomes(account_id, year, income_rows):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Кэш asset_id по тикеру для данного брокера
-    cursor.execute("""
-        SELECT id, ticker FROM assets WHERE broker_id = ?
-    """, (account_id,))
-    ticker_to_id = {row['ticker'].strip(): row['id'] for row in cursor.fetchall()}
+    try:
+        # Кэш asset_id по тикеру для данного брокера
+        cursor.execute("""
+            SELECT id, ticker FROM assets WHERE broker_id = ?
+        """, (account_id,))
+        ticker_to_id = {row['ticker'].strip(): row['id'] for row in cursor.fetchall()}
 
-    created = 0
-    without_asset = 0
+        created = 0
+        without_asset = 0
 
-    for row in income_rows:
-        ticker = row['ticker']
-        income_type = row['income_type']
-        currency_code = row['currency_code']
-        month_values = row['month_values']
-        name = row.get('name', '')
+        for row in income_rows:
+            ticker = row['ticker']
+            income_type = row['income_type']
+            currency_code = row['currency_code']
+            month_values = row['month_values']
+            name = row.get('name', '')
 
-        # Сохраняем тикер+имя в реестр
-        if ticker:
-            upsert_ticker_name(ticker, name)
+            # Сохраняем тикер+имя в реестр
+            if ticker:
+                upsert_ticker_name(ticker, name, cursor=cursor)
 
-        currency_id = get_currency_id(currency_code)
-        asset_id = ticker_to_id.get(ticker.strip())
+            currency_id = get_currency_id(currency_code)
+            asset_id = ticker_to_id.get(ticker.strip())
 
-        if asset_id is None:
-            without_asset += 1
+            if asset_id is None:
+                without_asset += 1
 
-        for month_num in sorted(month_values.keys()):
-            amount = month_values[month_num]
-            if amount <= 0:
-                continue
+            for month_num in sorted(month_values.keys()):
+                amount = month_values[month_num]
+                if amount <= 0:
+                    continue
 
-            last_day = calendar.monthrange(year, month_num)[1]
-            date_str = f"{year:04d}-{month_num:02d}-{last_day:02d}"
-            notes = f"Импорт за {year} {_INCOME_MONTH_NAMES[month_num - 1]}"
+                last_day = calendar.monthrange(year, month_num)[1]
+                date_str = f"{year:04d}-{month_num:02d}-{last_day:02d}"
+                notes = f"Импорт за {year} {_INCOME_MONTH_NAMES[month_num - 1]}"
 
-            add_transaction_internal(cursor, income_type, account_id, amount, currency_id, ticker,
-                                     notes, tx_date=date_str, asset_id=asset_id)
-            created += 1
+                add_transaction_internal(cursor, income_type, account_id, amount, currency_id, ticker,
+                                         notes, tx_date=date_str, asset_id=asset_id)
+                created += 1
 
-    conn.commit()
-    conn.close()
-    return (created, without_asset)
+        conn.commit()
+        return (created, without_asset)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ================================================================
