@@ -12,7 +12,7 @@ else:
 DB_PATH = os.path.join(_APP_DIR, "investments.db")
 
 # Текущая версия схемы базы данных
-CURRENT_DB_VERSION = 1
+CURRENT_DB_VERSION = 2
 
 _TYPE_MAP = {
     'stock': 'Мос.Биржа',
@@ -291,6 +291,7 @@ def init_db():
             purchase_date TEXT NOT NULL,
             created_at TEXT NOT NULL,
             currency_id INTEGER NOT NULL DEFAULT 1,
+            coupon_percent REAL,
             FOREIGN KEY (broker_id) REFERENCES accounts(id),
             FOREIGN KEY (currency_id) REFERENCES currencies(id)
         )
@@ -464,16 +465,15 @@ def migrate_db():
     print(f"[migrate_db] Текущая версия БД: {current}, целевая: {CURRENT_DB_VERSION}")
 
     # ─── Миграции (применяются по очереди) ───
-    # Пока миграций нет. Заготовка для будущего:
-    #
-    # if current < 2:
-    #     cursor.execute("ALTER TABLE ... ADD COLUMN ...")
-    #     cursor.execute("UPDATE db_version SET version = 2")
-    #     current = 2
-    #     print("[migrate_db] Применена миграция до версии 2")
-    #
-    # if current < 3:
-    #     ...
+    if current < 2:
+        cursor.execute("ALTER TABLE assets ADD COLUMN face_value REAL DEFAULT 1000")
+        cursor.execute("ALTER TABLE assets ADD COLUMN lot_size INTEGER DEFAULT 1")
+        cursor.execute("ALTER TABLE assets ADD COLUMN lot_value REAL DEFAULT 1000")
+        cursor.execute("ALTER TABLE assets ADD COLUMN list_level INTEGER")
+        cursor.execute("ALTER TABLE assets ADD COLUMN coupon_percent REAL")
+        cursor.execute("UPDATE db_version SET version = 2")
+        current = 2
+        print("[migrate_db] Применена миграция до версии 2")
 
     conn.commit()
     conn.close()
@@ -799,8 +799,8 @@ def add_asset(ticker, asset_type, quantity, price, purchase_date, account_id=Non
 
     cursor.execute("""
         INSERT INTO assets
-            (ticker, name, asset_type, quantity, avg_price, broker_id, purchase_date, created_at, currency_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (ticker, name, asset_type, quantity, avg_price, broker_id, purchase_date, created_at, currency_id, face_value, lot_size, lot_value, list_level)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1000, 1, 1000, NULL)
     """, (ticker, name, asset_type, quantity, price, account_id, purchase_date, created_at, currency_id))
     asset_id = cursor.lastrowid
 
@@ -937,8 +937,9 @@ def sell_asset(asset_id, sell_price, sell_date, quantity=None):
         sold_qty = asset_quantity
 
     if asset["asset_type"] == "облигация":
-        sell_sum = sell_price * sold_qty * 1000 / 100
-        profit = (sell_price - asset["avg_price"]) * sold_qty * 1000 / 100
+        fv = asset["face_value"] or 1000
+        sell_sum = sell_price * sold_qty * fv / 100
+        profit = (sell_price - asset["avg_price"]) * sold_qty * fv / 100
     else:
         sell_sum = sell_price * sold_qty
         profit = (sell_price - asset["avg_price"]) * sold_qty
@@ -965,7 +966,7 @@ def sell_asset(asset_id, sell_price, sell_date, quantity=None):
     cursor.execute("UPDATE snapshot_assets SET asset_id = NULL WHERE asset_id = ?", (asset_id,))
 
     # Сохраняем имя тикера в реестре перед удалением
-    upsert_ticker_name(asset["ticker"], asset.get("name", ""))
+    upsert_ticker_name(asset["ticker"], asset["name"] or "")
 
     remaining_qty = asset_quantity - sold_qty
     if remaining_qty <= 0.000001:
@@ -1019,12 +1020,13 @@ def buy_more_asset(asset_id, add_qty, buy_price, buy_date):
     asset_currency_code = get_currency_code(asset_currency_id)
 
     if asset["asset_type"] == "облигация":
-        purchase_sum = add_qty * buy_price * 1000 / 100
+        fv = asset["face_value"] or 1000
+        purchase_sum = add_qty * buy_price * fv / 100
     else:
         purchase_sum = add_qty * buy_price
 
     # Регистрируем тикер в справочнике
-    upsert_ticker_name(asset["ticker"], asset.get("name", ""))
+    upsert_ticker_name(asset["ticker"], asset["name"] or "")
 
     acc_currency_id = asset_currency_id
     if account_id is not None:
@@ -1246,7 +1248,8 @@ def save_snapshot():
                 current_price = a["avg_price"]
             currency_id = a["currency_id"]
             value_rub = calculate_total_in_rubles(a["quantity"], current_price,
-                                                  currency_id, rates, a["asset_type"])
+                                                  currency_id, rates, a["asset_type"],
+                                                  a["face_value"] or 1000)
             assets_value_rub += value_rub
             fx_rate = _fx_rate_for_currency(currency_id, rates)
             asset_rows.append({
@@ -1561,11 +1564,11 @@ def get_exchange_rates():
     return rates
 
 
-def calculate_total_in_rubles(quantity, avg_price, currency_id, rates, asset_type="акция"):
+def calculate_total_in_rubles(quantity, avg_price, currency_id, rates, asset_type="акция", face_value=1000):
     """Рассчитать стоимость в рублях."""
     code = get_currency_code(currency_id)
     if asset_type == "облигация":
-        total = quantity * avg_price * 1000 / 100
+        total = quantity * avg_price * face_value / 100
     else:
         total = quantity * avg_price
     if code == "USD":
@@ -1581,15 +1584,37 @@ def calculate_total_in_rubles(quantity, avg_price, currency_id, rates, asset_typ
 #  Prices
 # ================================================================
 
-def update_asset_price(asset_id, current_price, last_update):
-    """Обновить текущую цену и дату обновления актива."""
+def update_asset_price(asset_id, current_price, last_update, face_value=None, lot_size=None, lot_value=None, list_level=None, coupon_percent=None):
+    """Обновить текущую цену, дату и (опционально) метаданные облигации."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("""
+    sets = []
+    params = []
+    sets.append("current_price = ?")
+    params.append(current_price)
+    sets.append("last_update = ?")
+    params.append(last_update)
+    if face_value is not None:
+        sets.append("face_value = ?")
+        params.append(face_value)
+    if lot_size is not None:
+        sets.append("lot_size = ?")
+        params.append(lot_size)
+    if lot_value is not None:
+        sets.append("lot_value = ?")
+        params.append(lot_value)
+    if list_level is not None:
+        sets.append("list_level = ?")
+        params.append(list_level)
+    if coupon_percent is not None:
+        sets.append("coupon_percent = ?")
+        params.append(coupon_percent)
+    params.append(asset_id)
+    cursor.execute(f"""
         UPDATE assets
-        SET current_price = ?, last_update = ?
+        SET {', '.join(sets)}
         WHERE id = ?
-    """, (current_price, last_update, asset_id))
+    """, tuple(params))
     conn.commit()
     conn.close()
 

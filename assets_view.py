@@ -9,7 +9,7 @@ from database import (
     get_ticker_name
 )
 from datetime import datetime
-from api_client import fetch_price, is_connected
+from api_client import fetch_price, is_connected, _fetch_bond_static
 from calendar_utils import create_date_entry
 from table_utils import apply_zebra
 
@@ -56,34 +56,42 @@ class AssetsView(tb.Frame):
         table_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
         # Treeview для отображения активов
-        # Новый порядок: broker, name, ticker, currency, asset_type, quantity, avg_price, current_price, purchase_date, last_update, total_value
-        columns = ('broker', 'name', 'ticker', 'currency', 'asset_type', 'quantity', 'avg_price', 'current_price', 'purchase_date', 'last_update', 'total_value')
+        columns = ('name', 'ticker', 'coupon_percent', 'asset_type', 'list_level', 'quantity', 'lot_value', 'avg_price', 'current_price', 'total_value', 'purchase_date', 'last_update', 'currency')
         self.tree = tb.Treeview(table_frame, columns=columns, show='headings', height=20)
 
+        style = tb.Style()
+        style.configure('Assets.Treeview.Heading', font=('Arial', 8, 'bold'))
+
         # Настройка колонок
-        self.tree.heading('broker', text='Брокер')
         self.tree.heading('name', text='Название бумаги')
         self.tree.heading('ticker', text='Код')
-        self.tree.heading('currency', text='Валюта')
+        self.tree.heading('coupon_percent', text='Ставка %')
         self.tree.heading('asset_type', text='Тип')
+        self.tree.heading('list_level', text='Уровень')
         self.tree.heading('quantity', text='Количество')
+        self.tree.heading('lot_value', text='Стоимость лота')
         self.tree.heading('avg_price', text='Средняя цена')
         self.tree.heading('current_price', text='Текущая цена')
+        self.tree.heading('total_value', text='Общая стоимость')
         self.tree.heading('purchase_date', text='Дата покупки')
         self.tree.heading('last_update', text='Последнее обновление')
-        self.tree.heading('total_value', text='Общая стоимость (₽)')
+        self.tree.heading('currency', text='Валюта')
 
-        self.tree.column('broker', width=90)
         self.tree.column('name', width=150)
         self.tree.column('ticker', width=70)
-        self.tree.column('currency', width=60, anchor=tk.CENTER)
+        self.tree.column('coupon_percent', width=80, anchor=tk.CENTER)
         self.tree.column('asset_type', width=60)
-        self.tree.column('quantity', width=70)
-        self.tree.column('avg_price', width=80)
-        self.tree.column('current_price', width=80)
-        self.tree.column('purchase_date', width=90)
-        self.tree.column('last_update', width=120)
-        self.tree.column('total_value', width=100)
+        self.tree.column('list_level', width=60, anchor=tk.CENTER)
+        self.tree.column('quantity', width=80, anchor=tk.CENTER)
+        self.tree.column('lot_value', width=90, anchor=tk.E)
+        self.tree.column('avg_price', width=80, anchor=tk.E)
+        self.tree.column('current_price', width=85, anchor=tk.E)
+        self.tree.column('total_value', width=120, anchor=tk.E)
+        self.tree.column('purchase_date', width=90, anchor=tk.CENTER)
+        self.tree.column('last_update', width=120, anchor=tk.CENTER)
+        self.tree.column('currency', width=60, anchor=tk.CENTER)
+
+        self.tree.configure(style='Assets.Treeview')
 
         # Скроллбар
         scrollbar = tb.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -171,7 +179,19 @@ class AssetsView(tb.Frame):
                 price, error = fetch_price(ticker, asset_type)
                 
                 if price is not None:
-                    update_asset_price(asset_id, price, now)
+                    static_data = None
+                    if asset_type == "облигация":
+                        static_data = _fetch_bond_static(ticker)
+                    if static_data:
+                        fv = static_data.get("face_value") or (asset["face_value"] or 1000)
+                        ls = static_data.get("lot_size") or 1
+                        lv = fv * ls if fv and ls else fv
+                        ll = static_data.get("list_level")
+                        cp = static_data.get("coupon_percent")
+                        update_asset_price(asset_id, price, now,
+                                         face_value=fv, lot_size=ls, lot_value=lv, list_level=ll, coupon_percent=cp)
+                    else:
+                        update_asset_price(asset_id, price, now)
                     success += 1
                     self.status_var.set(f"[{i}/{total}] {ticker}: {price:.2f} ✓")
                 else:
@@ -262,11 +282,13 @@ class AssetsView(tb.Frame):
             for asset in broker_assets:
                 currency = self._get_currency_from_asset(asset)
                 
-                # Рассчитываем общую стоимость в рублях
+                # Рассчитываем общую стоимость в рублях (по текущей цене)
+                price_for_total = asset["current_price"] or asset["avg_price"]
                 if asset["asset_type"] == "облигация":
-                    total_rub = asset["quantity"] * asset["avg_price"] * 1000 / 100
+                    fv = asset["face_value"] or 1000
+                    total_rub = asset["quantity"] * price_for_total * fv / 100
                 else:
-                    total_rub = asset["quantity"] * asset["avg_price"]
+                    total_rub = asset["quantity"] * price_for_total
                 if currency == "USD":
                     total_rub *= rates.get("USD", 90.0)
                 elif currency == "EUR":
@@ -297,18 +319,36 @@ class AssetsView(tb.Frame):
                     price_str = "нет данных"
                     update_display = "never"
                 
+                # Уровень листинга
+                list_level = asset["list_level"]
+                list_level_display = str(list_level) if list_level is not None else "—"
+                
+                # Стоимость лота
+                lot_value = asset["lot_value"] or 1000
+                lot_value_display = f"{lot_value:.2f}" if lot_value > 0 else "—"
+                # Проверяем, что это облигация — для акций/ETF показываем прочёрк
+                if asset["asset_type"] != "облигация":
+                    list_level_display = "—"
+                    lot_value_display = "—"
+                
+                # Купонная ставка
+                cp = asset["coupon_percent"]
+                coupon_display = f"{cp:.2f}" if cp is not None else "—"
+
                 self.tree.insert('', tk.END, values=(
-                    broker_name,
                     name,
                     asset["ticker"],
-                    currency,
+                    coupon_display,
                     display_type,
+                    list_level_display,
                     asset["quantity"],
+                    lot_value_display,
                     f"{asset['avg_price']:.2f}",
                     price_str,
+                    f"{total_rub:.2f}",
                     asset["purchase_date"],
                     update_display,
-                    f"{total_rub:.2f}"
+                    currency
                 ), tags=(str(asset["id"]),))
 
         self.status_var.set(f"Всего активов: {len(assets)}")
@@ -550,7 +590,7 @@ class AssetsView(tb.Frame):
         info_frame.pack(fill=tk.X)
 
         tb.Label(info_frame, text=f"Код: {ticker}").pack(anchor=tk.W)
-        tb.Label(info_frame, text=f"Название: {values[1]}").pack(anchor=tk.W)
+        tb.Label(info_frame, text=f"Название: {values[0]}").pack(anchor=tk.W)
         tb.Label(info_frame, text=f"Количество: {quantity}").pack(anchor=tk.W)
         tb.Label(info_frame, text=f"Счёт: {account_name}").pack(anchor=tk.W)
         tb.Label(info_frame, text=f"Валюта: {currency}").pack(anchor=tk.W)
@@ -558,10 +598,12 @@ class AssetsView(tb.Frame):
 
         # Получаем курсы для расчёта стоимости в рублях
         rates = get_exchange_rates()
+        current_price = asset["current_price"] or avg_price
         if asset_type == "облигация":
-            total_rub = quantity * avg_price * 1000 / 100
+            fv = asset["face_value"] or 1000
+            total_rub = quantity * current_price * fv / 100
         else:
-            total_rub = quantity * avg_price
+            total_rub = quantity * current_price
         if currency == "USD":
             total_rub *= rates.get("USD", 90.0)
         elif currency == "EUR":
@@ -867,7 +909,7 @@ class AssetsView(tb.Frame):
             items = ["Новый"]
             for a in all_assets:
                 a = dict(a)
-                display = f'{a.get("name", "")} · {a["ticker"]}'
+                display = f'{a["name"] or ""} · {a["ticker"]}'
                 items.append(display)
             asset_combo.config(values=items)
             asset_var.set("Новый")
@@ -890,15 +932,15 @@ class AssetsView(tb.Frame):
                     broker = account_options.get(acct_name)
                 for a in get_all_assets(broker_id=broker):
                     a = dict(a)
-                    display = f'{a.get("name", "")} · {a["ticker"]}'
+                    display = f'{a["name"] or ""} · {a["ticker"]}'
                     if display == sel:
                         asset_id_var.set(str(a["id"]))
                         info_fields["ticker"].set(a["ticker"])
-                        info_fields["name"].set(a.get("name", ""))
+                        info_fields["name"].set(a["name"] or "")
                         info_fields["asset_type"].set(a["asset_type"])
-                        info_fields["currency"].set(a.get("currency_code", "RUB"))
+                        info_fields["currency"].set(a["currency_code"] or "RUB")
                         type_combo_var.set(a["asset_type"])
-                        currency_combo_var.set(a.get("currency_code", "RUB"))
+                        currency_combo_var.set(a["currency_code"] or "RUB")
                         break
 
         def _on_ticker_autofill(*_):
@@ -927,14 +969,14 @@ class AssetsView(tb.Frame):
                 asset = get_asset(int(sel_asset_id))
                 if asset:
                     asset = dict(asset)
-                    if asset.get("broker_id"):
+                    if asset["broker_id"]:
                         for an in account_values:
                             aid_check = account_options.get(an)
                             if aid_check == asset["broker_id"]:
                                 account_var.set(an)
                                 break
                     _refresh_asset_list()
-                    display = f'{asset.get("name", "")} · {asset["ticker"]}'
+                    display = f'{asset["name"] or ""} · {asset["ticker"]}'
                     asset_var.set(display)
                     _on_asset_select()
 
@@ -994,7 +1036,7 @@ class AssetsView(tb.Frame):
                                 icon="warning"
                             )
                             if r is True:  # Yes — переключиться на докупку
-                                if a.get("broker_id"):
+                                if a["broker_id"]:
                                     for an in account_values:
                                         aid_check = account_options.get(an)
                                         if aid_check == a["broker_id"]:
@@ -1004,11 +1046,11 @@ class AssetsView(tb.Frame):
                                 asset_id_var.set(str(a["id"]))
                                 _set_fields_editable(False)
                                 info_fields["ticker"].set(a["ticker"])
-                                info_fields["name"].set(a.get("name", ""))
+                                info_fields["name"].set(a["name"] or "")
                                 info_fields["asset_type"].set(a["asset_type"])
-                                info_fields["currency"].set(a.get("currency_code", "RUB"))
+                                info_fields["currency"].set(a["currency_code"] or "RUB")
                                 type_combo_var.set(a["asset_type"])
-                                currency_combo_var.set(a.get("currency_code", "RUB"))
+                                currency_combo_var.set(a["currency_code"] or "RUB")
                             elif r is False:  # No — создать дубликат
                                 break
                             else:
