@@ -510,7 +510,7 @@ class AssetsView(tb.Frame):
                 if account_name != "Не указан":
                     account_id = account_options.get(account_name)
 
-                update_asset(asset_id, ticker_new, asset_type, quantity, price, purchase_date, broker_id=account_id, name=name, currency=currency)
+                update_asset(asset_id, ticker_new, asset_type, quantity, price, purchase_date, broker_id=account_id, name=name, currency_code=currency)
                 messagebox.showinfo("Успех", f"Актив {ticker_new} обновлён")
                 dialog.destroy()
                 self.refresh()
