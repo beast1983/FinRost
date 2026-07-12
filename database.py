@@ -169,7 +169,9 @@ def update_ticker_name(ticker, name):
     """Обновить имя тикера."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE ticker_names SET name = ? WHERE ticker = ?", (name, ticker.strip().upper()))
+    ticker = str(ticker).strip().upper()
+    name = str(name).strip() if name else ''
+    cursor.execute("UPDATE ticker_names SET name = ? WHERE ticker = ?", (name, ticker))
     conn.commit()
     conn.close()
 
@@ -178,9 +180,11 @@ def add_ticker_name(ticker, name):
     """Добавить новую запись в реестр тикеров."""
     conn = get_connection()
     cursor = conn.cursor()
+    ticker = str(ticker).strip().upper()
+    name = str(name).strip() if name else ''
     try:
         cursor.execute("INSERT INTO ticker_names (ticker, name) VALUES (?, ?)",
-                       (ticker.strip().upper(), name.strip()))
+                       (ticker, name))
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
@@ -192,7 +196,8 @@ def delete_ticker_name(ticker):
     """Удалить запись из реестра."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM ticker_names WHERE ticker = ?", (ticker.strip().upper(),))
+    ticker = str(ticker).strip().upper()
+    cursor.execute("DELETE FROM ticker_names WHERE ticker = ?", (ticker,))
     conn.commit()
     conn.close()
 
@@ -201,9 +206,9 @@ def rename_ticker(old_ticker, new_ticker, name):
     """Переименовать тикер с каскадным обновлением всех связанных таблиц."""
     conn = get_connection()
     cursor = conn.cursor()
-    old_ticker = old_ticker.strip().upper()
-    new_ticker = new_ticker.strip().upper()
-    name = name.strip() if name else ''
+    old_ticker = str(old_ticker).strip().upper()
+    new_ticker = str(new_ticker).strip().upper()
+    name = str(name).strip() if name else ''
     try:
         if old_ticker != new_ticker:
             cursor.execute("SELECT ticker FROM ticker_names WHERE ticker = ?", (new_ticker,))
@@ -226,7 +231,7 @@ def get_ticker_name(ticker):
     """Получить имя тикера из реестра."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM ticker_names WHERE ticker = ?", (ticker.strip().upper(),))
+    cursor.execute("SELECT name FROM ticker_names WHERE ticker = ?", (str(ticker).strip().upper(),))
     row = cursor.fetchone()
     conn.close()
     return row["name"] if row else None
@@ -893,6 +898,8 @@ def update_asset(asset_id, ticker, asset_type, quantity, price, purchase_date,
     conn = get_connection()
     cursor = conn.cursor()
     price = round_price(price)
+    # При редактировании пополняем реестр тикеров (защита от пустых значений внутри функции)
+    upsert_ticker_name(ticker, name)
     cursor.execute("""
         UPDATE assets
         SET ticker = ?, name = ?, asset_type = ?, quantity = ?, avg_price = ?,
@@ -999,8 +1006,8 @@ def sell_asset(asset_id, sell_price, sell_date, quantity=None):
     return result, True, msg
 
 
-def buy_more_asset(asset_id, add_qty, buy_price, buy_date):
-    """Докупка актива."""
+def buy_more_asset(asset_id, add_qty, buy_price, buy_date, account_id=None):
+    """Докупка актива. Если account_id указан — используется он; иначе берётся broker_id актива."""
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -1015,7 +1022,7 @@ def buy_more_asset(asset_id, add_qty, buy_price, buy_date):
         conn.close()
         return None, False, "Актив не найден"
 
-    account_id = asset["broker_id"]
+    effective_account_id = account_id if account_id is not None else asset["broker_id"]
     asset_currency_id = asset["currency_id"]
     asset_currency_code = get_currency_code(asset_currency_id)
 
@@ -1029,9 +1036,9 @@ def buy_more_asset(asset_id, add_qty, buy_price, buy_date):
     upsert_ticker_name(asset["ticker"], asset["name"] or "")
 
     acc_currency_id = asset_currency_id
-    if account_id is not None:
+    if effective_account_id is not None:
         cursor.execute(
-            "SELECT balance, currency_id FROM accounts WHERE id = ?", (account_id,)
+            "SELECT balance, currency_id FROM accounts WHERE id = ?", (effective_account_id,)
         )
         acc_row = cursor.fetchone()
         if acc_row:
@@ -1048,7 +1055,7 @@ def buy_more_asset(asset_id, add_qty, buy_price, buy_date):
                     f"на счёте {acc_row['balance']:.2f} {acc_code}"
                 )
             new_bal = round_price(acc_row["balance"] - amount_in_acc_currency)
-            cursor.execute("UPDATE accounts SET balance = ? WHERE id = ?", (new_bal, account_id))
+            cursor.execute("UPDATE accounts SET balance = ? WHERE id = ?", (new_bal, effective_account_id))
 
     old_qty = asset["quantity"]
     old_avg = asset["avg_price"]
@@ -1057,21 +1064,21 @@ def buy_more_asset(asset_id, add_qty, buy_price, buy_date):
     new_avg = round_price(new_avg)
 
     cursor.execute("UPDATE assets SET quantity=?, avg_price=? WHERE id=?",
-                   (new_qty, new_avg, asset_id))
+                    (new_qty, new_avg, asset_id))
 
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("""
         INSERT INTO buys (asset_id, ticker, quantity, price, currency_id, broker_id, buy_date, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (asset_id, asset["ticker"], add_qty, buy_price, asset_currency_id, account_id, buy_date, created_at))
+    """, (asset_id, asset["ticker"], add_qty, buy_price, asset_currency_id, effective_account_id, buy_date, created_at))
 
-    if account_id is not None:
+    if effective_account_id is not None:
         acc_code = get_currency_code(acc_currency_id)
         rates = _get_rates_from_db(cursor)
         amount_in_acc_curr = compute_amount_in_account_currency(
             purchase_sum, asset_currency_code, acc_code, rates
         )
-        add_transaction_internal(cursor, 'покупка', account_id, amount_in_acc_curr,
+        add_transaction_internal(cursor, 'покупка', effective_account_id, amount_in_acc_curr,
                                  acc_currency_id, asset["ticker"],
                                  f"Докупка {add_qty}×{asset['ticker']} по {buy_price:.2f}",
                                  asset_id=asset_id, qty=add_qty, price=buy_price, profit=None)

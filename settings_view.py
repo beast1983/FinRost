@@ -954,8 +954,8 @@ class TickerRegistryTab(tb.Frame):
 
         ticker_key = self.tree.item(sel[0])['tags'][0]
         values = self.tree.item(sel[0])['values']
-        old_ticker = ticker_key
-        old_name = values[1] if len(values) > 1 else ''
+        old_ticker = str(ticker_key).strip().upper()
+        old_name = str(values[1]) if len(values) > 1 else ''
 
         dialog = tb.Toplevel(self)
         dialog.title("Редактировать тикер")
@@ -1004,7 +1004,7 @@ class TickerRegistryTab(tb.Frame):
             messagebox.showwarning("Выбор", "Выберите запись для удаления")
             return
 
-        ticker = self.tree.item(sel[0])['tags'][0]
+        ticker = str(self.tree.item(sel[0])['tags'][0])
 
         if messagebox.askyesno("Подтверждение", f"Удалить тикер {ticker} из реестра?"):
             delete_ticker_name(ticker)

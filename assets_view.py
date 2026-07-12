@@ -990,84 +990,92 @@ class AssetsView(tb.Frame):
                 qty = float(qty_var.get())
                 price = float(price_var.get())
                 buy_date = date_entry.get_date().strftime("%Y-%m-%d")
-
-                if qty <= 0 or price <= 0:
-                    messagebox.showerror("Ошибка", "Количество и цена должны быть больше 0")
-                    return
-
-                if asset_id_var.get():
-                    # Существующий актив — докупка
-                    aid = int(asset_id_var.get())
-                    result, success, msg = buy_more_asset(aid, qty, price, buy_date)
-                    if success:
-                        messagebox.showinfo("Успех",
-                                            f"{result['ticker']}: докуплено.\n"
-                                            f"Новое количество: {result['new_qty']:.2f}\n"
-                                            f"Новая средняя цена: {result['new_avg_price']:.2f}\n"
-                                            f"{msg}")
-                        dialog.destroy()
-                        self.refresh()
-                    else:
-                        messagebox.showerror("Ошибка", msg)
-                else:
-                    # Новый актив
-                    ticker = info_fields["ticker"].get().strip()
-                    name = info_fields["name"].get().strip()
-                    asset_type = type_combo_var.get()
-                    currency = currency_combo_var.get()
-                    acct_name = account_var.get()
-                    account_id = None
-                    if acct_name != "Не указан":
-                        account_id = account_options.get(acct_name)
-
-                    if not ticker or not name:
-                        messagebox.showerror("Ошибка", "Тикер и название обязательно")
-                        return
-
-                    # Проверка дубликата тикера
-                    all_assets = get_all_assets()
-                    for a in all_assets:
-                        a = dict(a)
-                        if a["ticker"] == ticker:
-                            r = messagebox.askyesnocancel(
-                                "Дубликат тикера",
-                                f"Актив с тикером {ticker} уже существует.\n"
-                                "Переключиться на докупку?",
-                                icon="warning"
-                            )
-                            if r is True:  # Yes — переключиться на докупку
-                                if a["broker_id"]:
-                                    for an in account_values:
-                                        aid_check = account_options.get(an)
-                                        if aid_check == a["broker_id"]:
-                                            account_var.set(an)
-                                            break
-                                    _refresh_asset_list()
-                                asset_id_var.set(str(a["id"]))
-                                _set_fields_editable(False)
-                                info_fields["ticker"].set(a["ticker"])
-                                info_fields["name"].set(a["name"] or "")
-                                info_fields["asset_type"].set(a["asset_type"])
-                                info_fields["currency"].set(a["currency_code"] or "RUB")
-                                type_combo_var.set(a["asset_type"])
-                                currency_combo_var.set(a["currency_code"] or "RUB")
-                            elif r is False:  # No — создать дубликат
-                                break
-                            else:
-                                return  # Cancel
-                            break
-
-                    result, success, msg = add_asset(ticker, asset_type, qty, price, buy_date,
-                                                      account_id=account_id, name=name, currency_code=currency)
-                    if success:
-                        messagebox.showinfo("Успех", f"Актив {ticker} добавлен\n{msg}")
-                    else:
-                        messagebox.showerror("Ошибка", msg)
-                        return
-                    dialog.destroy()
-                    self.refresh()
             except ValueError:
                 messagebox.showerror("Ошибка", "Некорректный ввод чисел")
+                return
+
+            acct_name = account_var.get()
+            if not acct_name or acct_name == "Не указан":
+                messagebox.showerror("Ошибка", "Выберите счёт")
+                return
+
+            if qty <= 0:
+                messagebox.showerror("Ошибка", "Количество должно быть больше 0")
+                return
+
+            if price <= 0:
+                messagebox.showerror("Ошибка", "Цена должна быть больше 0")
+                return
+
+            if asset_id_var.get():
+                # Существующий актив — докупка
+                aid = int(asset_id_var.get())
+                account_id = account_options.get(acct_name)
+                result, success, msg = buy_more_asset(aid, qty, price, buy_date, account_id=account_id)
+                if success:
+                    messagebox.showinfo("Успех",
+                                        f"{result['ticker']}: докуплено.\n"
+                                        f"Новое количество: {result['new_qty']:.2f}\n"
+                                        f"Новая средняя цена: {result['new_avg_price']:.2f}\n"
+                                        f"{msg}")
+                    dialog.destroy()
+                    self.refresh()
+                else:
+                    messagebox.showerror("Ошибка", msg)
+            else:
+                # Новый актив
+                ticker = info_fields["ticker"].get().strip()
+                name = info_fields["name"].get().strip()
+                asset_type = type_combo_var.get()
+                currency = currency_combo_var.get()
+                account_id = account_options.get(acct_name)
+
+                if not name:
+                    messagebox.showerror("Ошибка", "Введите название")
+                    return
+
+                # Проверка дубликата тикера
+                all_assets = get_all_assets()
+                for a in all_assets:
+                    a = dict(a)
+                    if a["ticker"] == ticker:
+                        r = messagebox.askyesnocancel(
+                            "Дубликат тикера",
+                            f"Актив с тикером {ticker} уже существует.\n"
+                            "Переключиться на докупку?",
+                            icon="warning"
+                        )
+                        if r is True:  # Yes — переключиться на докупку
+                            if a["broker_id"]:
+                                for an in account_values:
+                                    aid_check = account_options.get(an)
+                                    if aid_check == a["broker_id"]:
+                                        account_var.set(an)
+                                        break
+                                _refresh_asset_list()
+                            asset_id_var.set(str(a["id"]))
+                            _set_fields_editable(False)
+                            info_fields["ticker"].set(a["ticker"])
+                            info_fields["name"].set(a["name"] or "")
+                            info_fields["asset_type"].set(a["asset_type"])
+                            info_fields["currency"].set(a["currency_code"] or "RUB")
+                            type_combo_var.set(a["asset_type"])
+                            currency_combo_var.set(a["currency_code"] or "RUB")
+                        elif r is False:  # No — создать дубликат
+                            break
+                        else:
+                            return  # Cancel
+                        break
+
+                result, success, msg = add_asset(ticker, asset_type, qty, price, buy_date,
+                                                  account_id=account_id, name=name, currency_code=currency)
+                if success:
+                    messagebox.showinfo("Успех", f"Актив {ticker} добавлен\n{msg}")
+                else:
+                    messagebox.showerror("Ошибка", msg)
+                    return
+                dialog.destroy()
+                self.refresh()
 
         # ---- Buttons ----
         btn_frame = tb.Frame(dialog)
