@@ -1256,7 +1256,8 @@ def save_snapshot():
             currency_id = a["currency_id"]
             value_rub = calculate_total_in_rubles(a["quantity"], current_price,
                                                   currency_id, rates, a["asset_type"],
-                                                  a["face_value"] or 1000)
+                                                  a["face_value"] or 1000,
+                                                  a["lot_size"] or 1)
             assets_value_rub += value_rub
             fx_rate = _fx_rate_for_currency(currency_id, rates)
             asset_rows.append({
@@ -1571,13 +1572,14 @@ def get_exchange_rates():
     return rates
 
 
-def calculate_total_in_rubles(quantity, avg_price, currency_id, rates, asset_type="акция", face_value=1000):
+def calculate_total_in_rubles(quantity, avg_price, currency_id, rates, asset_type="акция", face_value=1000, lot_size=1):
     """Рассчитать стоимость в рублях."""
     code = get_currency_code(currency_id)
     if asset_type == "облигация":
         total = quantity * avg_price * face_value / 100
     else:
-        total = quantity * avg_price
+        lot = lot_size if lot_size and lot_size > 0 else 1
+        total = quantity * lot * avg_price
     if code == "USD":
         total *= rates.get("USD", 90.0)
     elif code == "EUR":

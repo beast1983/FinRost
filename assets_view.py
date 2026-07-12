@@ -9,7 +9,7 @@ from database import (
     get_ticker_name
 )
 from datetime import datetime
-from api_client import fetch_price, is_connected, _fetch_bond_static
+from api_client import fetch_price, is_connected, _fetch_bond_static, _fetch_share_static
 from calendar_utils import create_date_entry
 from table_utils import apply_zebra
 
@@ -69,7 +69,7 @@ class AssetsView(tb.Frame):
         self.tree.heading('asset_type', text='Тип')
         self.tree.heading('list_level', text='Уровень')
         self.tree.heading('quantity', text='Количество')
-        self.tree.heading('lot_value', text='Стоимость лота')
+        self.tree.heading('lot_value', text='Лот')
         self.tree.heading('avg_price', text='Средняя цена')
         self.tree.heading('current_price', text='Текущая цена')
         self.tree.heading('total_value', text='Общая стоимость')
@@ -182,6 +182,10 @@ class AssetsView(tb.Frame):
                     static_data = None
                     if asset_type == "облигация":
                         static_data = _fetch_bond_static(ticker)
+                    elif asset_type == "акция":
+                        static_data = _fetch_share_static(ticker, "TQBR")
+                    elif asset_type == "etf":
+                        static_data = _fetch_share_static(ticker, "TQTF")
                     if static_data:
                         fv = static_data.get("face_value") or (asset["face_value"] or 1000)
                         ls = static_data.get("lot_size") or 1
@@ -288,7 +292,8 @@ class AssetsView(tb.Frame):
                     fv = asset["face_value"] or 1000
                     total_rub = asset["quantity"] * price_for_total * fv / 100
                 else:
-                    total_rub = asset["quantity"] * price_for_total
+                    lot = asset["lot_size"] or 1
+                    total_rub = asset["quantity"] * lot * price_for_total
                 if currency == "USD":
                     total_rub *= rates.get("USD", 90.0)
                 elif currency == "EUR":
@@ -322,14 +327,14 @@ class AssetsView(tb.Frame):
                 # Уровень листинга
                 list_level = asset["list_level"]
                 list_level_display = str(list_level) if list_level is not None else "—"
-                
-                # Стоимость лота
-                lot_value = asset["lot_value"] or 1000
-                lot_value_display = f"{lot_value:.2f}" if lot_value > 0 else "—"
-                # Проверяем, что это облигация — для акций/ETF показываем прочёрк
-                if asset["asset_type"] != "облигация":
-                    list_level_display = "—"
-                    lot_value_display = "—"
+
+                # Лот: для облигаций — стоимость (номинал × размер), для акций/ETF — размер лота (штук)
+                if asset["asset_type"] == "облигация":
+                    lot_value = asset["lot_value"] or 1000
+                    lot_display = f"{lot_value:.2f}" if lot_value > 0 else "—"
+                else:
+                    lot_size = asset["lot_size"]
+                    lot_display = str(lot_size) if lot_size is not None else "—"
                 
                 # Купонная ставка
                 cp = asset["coupon_percent"]
@@ -342,7 +347,7 @@ class AssetsView(tb.Frame):
                     display_type,
                     list_level_display,
                     asset["quantity"],
-                    lot_value_display,
+                    lot_display,
                     f"{asset['avg_price']:.2f}",
                     price_str,
                     f"{total_rub:.2f}",

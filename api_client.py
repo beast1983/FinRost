@@ -201,6 +201,72 @@ def _fetch_bond_static(ticker):
         return None
 
 
+def _fetch_share_static(ticker, preferred_board="TQBR"):
+    """
+    Получить статические данные акции/ETF из блока securities.
+
+    Запрос без доски возвращает несколько строк (по одной на каждую доску:
+    SMAL, SPEQ, TQBR и т.д.), причём LOTSIZE различается между ними
+    (например у GAZP на SMAL = 1, на TQBR = 10). Поэтому выбираем строку
+    канонической доски (TQBR для акций, TQTF для ETF), с fallback на первую.
+
+    Args:
+        ticker (str): Тикер бумаги
+        preferred_board (str): Предпочитаемая доска ('TQBR' для акций, 'TQTF' для ETF)
+
+    Returns:
+        dict с ключами:
+            lot_size (int)   — количество бумаг в лоте
+            list_level (int) — уровень листинга (1, 2, 3)
+        None при ошибке.
+    """
+    url = f"{API_BASE}/engines/stock/markets/shares/securities/{ticker}.json"
+
+    try:
+        data = _fetch_iss_data(url)
+        if data is None:
+            return None
+
+        securities = data.get("securities", {})
+        columns = securities.get("columns", [])
+        rows = securities.get("data", [])
+
+        if not rows or not columns:
+            return None
+
+        col_map = {name: idx for idx, name in enumerate(columns)}
+
+        # Поиск строки канонической доски, fallback на первую строку
+        board_idx = col_map.get("BOARDID")
+        row = rows[0]
+        if board_idx is not None:
+            for r in rows:
+                if len(r) > board_idx and r[board_idx] == preferred_board:
+                    row = r
+                    break
+
+        lot_size = None
+        list_level = None
+
+        lot_idx = col_map.get("LOTSIZE")
+        level_idx = col_map.get("LISTLEVEL")
+
+        if lot_idx is not None and len(row) > lot_idx and row[lot_idx] is not None:
+            lot_size = int(row[lot_idx])
+        if level_idx is not None and len(row) > level_idx and row[level_idx] is not None:
+            list_level = int(row[level_idx])
+
+        return {
+            "lot_size": lot_size,
+            "list_level": list_level,
+        }
+
+    except (ValueError, TypeError, IndexError, KeyError):
+        return None
+    except Exception:
+        return None
+
+
 def is_connected():
     """Проверить наличие подключения к интернету (пинг ISS API)."""
     try:
