@@ -55,53 +55,76 @@ def fetch_price(ticker, asset_type):
         return None, f"Цена для {ticker} не найдена на бирже"
 
 
-def _fetch_price_from_marketdata(ticker, engine, market, board):
+def _fetch_price_generic(ticker, market):
     """
-    Получить цену ценной бумаги через API Московской биржи.
+    Универсальное получение цены бумаги (акция/ETF/облигация) без привязки к доске.
+
+    Алгоритм:
+    1. Запрос без доски — https://iss.moex.com/iss/engines/stock/markets/{market}/securities/{ticker}.json
+    2. marketdata.LAST (первая ненулевая по любой доске — текущая цена сделки)
+    3. securities.PREVPRICE (цена закрытия прошлой сессии — приоритетный fallback)
+    4. securities.PREVWAPRICE → PREVLEGALCLOSEPRICE → marketdata.MARKETPRICE → MARKETPRICE2 → LCURRENTPRICE
 
     Args:
-        ticker (str): Тикер бумаги (например, 'GAZP')
-        engine (str): Движок — 'stock'
-        market (str): Рынок — 'shares' или 'bonds'
-        board (str): Торгующая система — 'TQBR' для акций, 'TQOB' для облигаций
+        ticker (str): Тикер бумаги
+        market (str): 'shares' или 'bonds'
 
     Returns:
-        float или None — последняя цена, либо None при ошибке/отсутствии данных.
+        float или None — цена бумаги, либо None при ошибке/отсутствии данных.
     """
-    url = (
-        f"{API_BASE}/engines/{engine}/markets/{market}/boards/{board}/securities/{ticker}.json"
-    )
+    url = f"{API_BASE}/engines/stock/markets/{market}/securities/{ticker}.json"
     data = _fetch_iss_data(url)
     if data is None:
         return None
 
-    # Парсим ответ: данные находятся в сегменте "marketdata" -> "data"
-    # Структура:
-    #   "marketdata": {
-    #       "columns": ["SECID", "BOARDID", "LAST", ...],
-    #       "data": [["GAZP", "TQBR", 150.5, ...]]
-    #   }
     try:
         marketdata = data.get("marketdata", {})
-        col_names = marketdata.get("columns", [])
-        rows = marketdata.get("data", [])
+        md_cols = marketdata.get("columns", [])
+        md_rows = marketdata.get("data", [])
+        securities = data.get("securities", {})
+        sec_cols = securities.get("columns", [])
+        sec_rows = securities.get("data", [])
 
-        # Находим индекс колонки "LAST"
-        last_idx = None
-        for i, name in enumerate(col_names):
-            if name == "LAST":
-                last_idx = i
-                break
+        md_idx = {name: i for i, name in enumerate(md_cols)}
+        sec_idx = {name: i for i, name in enumerate(sec_cols)}
 
-        if last_idx is None:
+        def first_nonnull(rows, idx_map, col):
+            """Найти первое непустое положительное числовое значение по имени колонки."""
+            i = idx_map.get(col)
+            if i is None:
+                return None
+            for row in rows:
+                if len(row) > i and row[i] is not None:
+                    val = row[i]
+                    try:
+                        val = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    if val > 0:
+                        return val
             return None
 
-        # Проходим по строкам данных ищем нужный тикер
-        for row in rows:
-            if len(row) > last_idx and row[0] == ticker:
-                last_price = row[last_idx]
-                if last_price is not None:
-                    return float(last_price)
+        # 1. LAST (по любой доске) — текущая цена последней сделки
+        price = first_nonnull(md_rows, md_idx, "LAST")
+        if price:
+            return price
+
+        # 2. PREVPRICE из securities — приоритетный fallback (цена закрытия прошлой сессии)
+        price = first_nonnull(sec_rows, sec_idx, "PREVPRICE")
+        if price:
+            return price
+
+        # 3. Дополнительные fallback'ы из securities
+        for col in ("PREVWAPRICE", "PREVLEGALCLOSEPRICE"):
+            price = first_nonnull(sec_rows, sec_idx, col)
+            if price:
+                return price
+
+        # 4. Дополнительные fallback'ы из marketdata
+        for col in ("MARKETPRICE", "MARKETPRICE2", "LCURRENTPRICE"):
+            price = first_nonnull(md_rows, md_idx, col)
+            if price:
+                return price
     except (ValueError, TypeError, IndexError, KeyError):
         return None
 
@@ -109,56 +132,13 @@ def _fetch_price_from_marketdata(ticker, engine, market, board):
 
 
 def _fetch_share_price(ticker):
-    """Получить цену акции через движок stock, рынок shares, доска TQBR."""
-    return _fetch_price_from_marketdata(ticker, "stock", "shares", "TQBR")
+    """Получить цену акции/ETF через движок stock, рынок shares (все доски)."""
+    return _fetch_price_generic(ticker, "shares")
 
 
 def _fetch_bond_price(ticker):
-    """
-    Универсальная функция для облигаций — без привязки к доске.
-    
-    Алгоритм:
-    1. Запрашиваем https://iss.moex.com/iss/engines/stock/markets/bonds/securities/{ticker}.json
-       БЕЗ указания доски — API вернёт данные по всем доскам
-    2. Берём первую строку с ненулевой ценой LAST
-    """
-    url = f"{API_BASE}/engines/stock/markets/bonds/securities/{ticker}.json"
-    
-    try:
-        data = _fetch_iss_data(url)
-        if data is None:
-            return None
-        
-        marketdata = data.get("marketdata", {})
-        columns = marketdata.get("columns", [])
-        rows = marketdata.get("data", [])
-        
-        if not rows or not columns:
-            return None
-        
-        # Находим индекс колонки "LAST"
-        last_idx = None
-        for i, name in enumerate(columns):
-            if name == "LAST":
-                last_idx = i
-                break
-        
-        if last_idx is None:
-            return None
-        
-        # Ищем первую строку с ненулевой ценой
-        for row in rows:
-            if len(row) > last_idx and row[last_idx] is not None:
-                price = float(row[last_idx])
-                if price > 0:
-                    return price
-                    
-    except (ValueError, TypeError, IndexError, KeyError):
-        return None
-    except Exception:
-        return None
-    
-    return None
+    """Получить цену облигации через движок stock, рынок bonds (все доски)."""
+    return _fetch_price_generic(ticker, "bonds")
 
 
 def _fetch_bond_static(ticker):
