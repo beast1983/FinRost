@@ -6,10 +6,11 @@ from database import (
     get_exchange_rates, calculate_total_in_rubles,
     get_snapshot_years, get_transaction_years,
     import_asset_slices, import_incomes,
-    get_all_ticker_names, import_ticker_names, add_ticker_name, update_ticker_name, delete_ticker_name, rename_ticker, get_ticker_name,
+    get_all_ticker_names, import_ticker_names, add_ticker_name, update_ticker_name, delete_ticker_name, rename_ticker, get_ticker_name, get_ticker_info,
+    update_ticker_from_moex,
     get_db_path, backup_database,
 )
-from api_client import fetch_cbr_exchange_rates
+from api_client import fetch_cbr_exchange_rates, fetch_ticker_static
 from datetime import datetime
 
 
@@ -835,12 +836,29 @@ class GeneralSettingsTab(tb.Frame):
 #  Вкладка «Реестр тикеров»
 # ═══════════════════════════════════════════════════════════
 
+_TYPE_MAP = {'акция': 'Акция', 'облигация': 'Облигация', 'etf': 'ETF'}
+_TYPE_CHOICES = ['акция', 'облигация', 'etf']
+_CURRENCY_CHOICES = ['RUB', 'USD', 'EUR', 'CNY']
+
+
+def _ui_type(key):
+    """Преобразовать хранящийся тип в отображаемый."""
+    return _TYPE_MAP.get(key, key) if key else ''
+
+
+def _db_type(ui_key):
+    """Преобразовать отображаемый тип в хранящийся."""
+    return ui_key.lower().strip() if ui_key else ''
+
+
 class TickerRegistryTab(tb.Frame):
     """Вкладка управления реестром тикеров."""
 
     def __init__(self, parent):
         super().__init__(parent)
+        self._creating_ui = True
         self._create_ui()
+        self._creating_ui = False
         self.refresh()
 
     def _create_ui(self):
@@ -850,10 +868,14 @@ class TickerRegistryTab(tb.Frame):
 
         tb.Label(search_frame, text="Поиск:").pack(side=tk.LEFT, padx=(0, 4))
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self.refresh())
+        self.search_var.trace_add("write", lambda *_: self._on_search())
         search_entry = tb.Entry(search_frame, textvariable=self.search_var, width=30)
         search_entry.pack(side=tk.LEFT, padx=(0, 5))
         _bind_entry_context_menu(search_entry)
+
+        # Статус (для синхронизации)
+        self._sync_status_var = tk.StringVar(value="")
+        tb.Label(search_frame, textvariable=self._sync_status_var, foreground="gray").pack(side=tk.RIGHT, padx=(5, 0))
 
         # Кнопки
         btn_frame = tb.Frame(self)
@@ -861,21 +883,28 @@ class TickerRegistryTab(tb.Frame):
         tb.Button(btn_frame, text="Добавить", command=self._add_ticker, bootstyle="success").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Редактировать", command=self._edit_ticker, bootstyle="info").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Удалить", command=self._delete_ticker, bootstyle="danger").pack(side=tk.LEFT, padx=2)
-        tb.Button(btn_frame, text="⬆ Импорт", command=self._import_tickers, bootstyle="warning").pack(side=tk.LEFT, padx=2)
+        tb.Button(btn_frame, text="🔄 Обновить с биржи", command=self._sync_from_moex, bootstyle="warning").pack(side=tk.LEFT, padx=2)
+        tb.Button(btn_frame, text="⬆ Импорт", command=self._import_tickers, bootstyle="secondary").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="⬇ Экспорт", command=self._export_tickers, bootstyle="secondary").pack(side=tk.LEFT, padx=2)
 
         # Таблица
         table_frame = tb.LabelFrame(self, text="Реестр", padx=5, pady=5)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        columns = ('ticker', 'name')
+        columns = ('ticker', 'name', 'type', 'lot_size', 'currency')
         self.tree = tb.Treeview(table_frame, columns=columns, show='headings')
 
         self.tree.heading('ticker', text='Тикер')
         self.tree.heading('name', text='Название')
+        self.tree.heading('type', text='Тип')
+        self.tree.heading('lot_size', text='Лотность')
+        self.tree.heading('currency', text='Валюта')
 
-        self.tree.column('ticker', width=200)
-        self.tree.column('name', width=300)
+        self.tree.column('ticker', width=140)
+        self.tree.column('name', width=200)
+        self.tree.column('type', width=70)
+        self.tree.column('lot_size', width=60)
+        self.tree.column('currency', width=60)
 
         scrollbar = tb.Scrollbar(
             table_frame, orient=tk.VERTICAL, command=self.tree.yview,
@@ -886,6 +915,12 @@ class TickerRegistryTab(tb.Frame):
 
         # Двойной клик для редактирования
         self.tree.bind('<Double-1>', lambda e: self._edit_ticker())
+
+    def _on_search(self):
+        """Перезапустить обновление с debounce для поиска."""
+        if hasattr(self, '_search_timer'):
+            self.after_cancel(self._search_timer)
+        self._search_timer = self.after(300, self.refresh)
 
     def refresh(self):
         """Обновить таблицу."""
@@ -898,34 +933,63 @@ class TickerRegistryTab(tb.Frame):
         search = self.search_var.get().strip().lower()
         rows = get_all_ticker_names()
 
-        for ticker, name in rows:
-            if search and search not in ticker.lower() and search not in name.lower():
+        for ticker, name, asset_type, lot_size, currency in rows:
+            if search and search not in ticker.lower() and search not in name.lower() and search not in (asset_type or '').lower():
                 continue
-            self.tree.insert('', tk.END, values=(ticker, name or ''), tags=(ticker,))
+            ui_type = _ui_type(asset_type)
+            self.tree.insert('', tk.END, values=(ticker, name or '', ui_type, lot_size or '', currency or ''), tags=(ticker,))
 
     def _add_ticker(self):
         """Добавить новый тикер."""
         dialog = tb.Toplevel(self)
         dialog.title("Добавить тикер")
-        dialog.geometry("350x200")
+        dialog.geometry("380x340")
         dialog.transient(self)
         dialog.grab_set()
 
-        tb.Label(dialog, text="Тикер:").grid(row=0, column=0, sticky=tk.W, padx=10, pady=10)
+        row = 0
+        tb.Label(dialog, text="Тикер:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=10)
         ticker_var = tk.StringVar()
         ticker_entry = tb.Entry(dialog, textvariable=ticker_var, width=30)
-        ticker_entry.grid(row=0, column=1, padx=5, pady=10)
+        ticker_entry.grid(row=row, column=1, padx=5, pady=10)
         _bind_entry_context_menu(ticker_entry)
+        row += 1
 
-        tb.Label(dialog, text="Название:").grid(row=1, column=0, sticky=tk.W, padx=10, pady=5)
+        tb.Label(dialog, text="Название:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
         name_var = tk.StringVar()
         name_entry = tb.Entry(dialog, textvariable=name_var, width=30)
-        name_entry.grid(row=1, column=1, padx=5, pady=5)
+        name_entry.grid(row=row, column=1, padx=5, pady=5)
         _bind_entry_context_menu(name_entry)
+        row += 1
+
+        tb.Label(dialog, text="Тип:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        type_var = tk.StringVar(value='акция')
+        type_combo = tb.Combobox(dialog, textvariable=type_var, values=_TYPE_CHOICES, width=27, state="readonly")
+        type_combo.grid(row=row, column=1, padx=5, pady=5)
+        row += 1
+
+        tb.Label(dialog, text="Лотность:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        lot_var = tk.StringVar(value="1")
+        lot_spin = tb.Spinbox(dialog, from_=1, to=9999, textvariable=lot_var, width=28, format="%d")
+        lot_spin.grid(row=row, column=1, padx=5, pady=5)
+        row += 1
+
+        tb.Label(dialog, text="Валюта:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        curr_var = tk.StringVar(value='RUB')
+        curr_combo = tb.Combobox(dialog, textvariable=curr_var, values=_CURRENCY_CHOICES, width=27, state="readonly")
+        curr_combo.grid(row=row, column=1, padx=5, pady=5)
+        row += 1
 
         def on_ok():
             ticker = ticker_var.get().strip().upper()
             name = name_var.get().strip()
+            asset_type = type_var.get()
+            lot_size = lot_var.get()
+            currency = curr_var.get()
+            try:
+                lot_size = int(lot_size)
+            except ValueError:
+                lot_size = 1
             if not ticker:
                 messagebox.showwarning("Ошибка", "Введите тикер")
                 return
@@ -933,7 +997,7 @@ class TickerRegistryTab(tb.Frame):
                 messagebox.showwarning("Ошибка", "Введите название")
                 return
             try:
-                add_ticker_name(ticker, name)
+                add_ticker_name(ticker, name, asset_type=asset_type, lot_size=lot_size, currency=currency)
             except ValueError:
                 messagebox.showwarning("Ошибка", f"Тикер {ticker} уже существует")
                 return
@@ -941,7 +1005,7 @@ class TickerRegistryTab(tb.Frame):
             self.refresh()
 
         btn_frame = tb.Frame(dialog)
-        btn_frame.grid(row=2, column=0, columnspan=2, pady=15)
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=15)
         tb.Button(btn_frame, text="Сохранить", command=on_ok, bootstyle="success").pack(side=tk.LEFT, padx=5)
         tb.Button(btn_frame, text="Отмена", command=dialog.destroy, bootstyle="secondary").pack(side=tk.LEFT, padx=5)
 
@@ -956,28 +1020,66 @@ class TickerRegistryTab(tb.Frame):
         values = self.tree.item(sel[0])['values']
         old_ticker = str(ticker_key).strip().upper()
         old_name = str(values[1]) if len(values) > 1 else ''
+        old_type = str(values[2]) if len(values) > 2 else 'акция'
+        old_lot = str(values[3]) if len(values) > 3 else '1'
+        old_curr = str(values[4]) if len(values) > 4 else ''
+
+        # Ищем полную информацию в БД (тип может быть в нижнем регистре)
+        info = get_ticker_info(old_ticker)
+        if info:
+            old_type = info.get("asset_type", old_type) or 'акция'
+            old_lot = str(info.get("lot_size", 1))
+            old_curr = info.get("currency", old_curr) or ''
 
         dialog = tb.Toplevel(self)
         dialog.title("Редактировать тикер")
-        dialog.geometry("350x200")
+        dialog.geometry("380x400")
         dialog.transient(self)
         dialog.grab_set()
 
-        tb.Label(dialog, text="Тикер:").grid(row=0, column=0, sticky=tk.W, padx=10, pady=10)
+        row = 0
+        tb.Label(dialog, text="Тикер:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=10)
         ticker_var = tk.StringVar(value=old_ticker)
         ticker_entry = tb.Entry(dialog, textvariable=ticker_var, width=30)
-        ticker_entry.grid(row=0, column=1, padx=5, pady=10)
+        ticker_entry.grid(row=row, column=1, padx=5, pady=10)
         _bind_entry_context_menu(ticker_entry)
+        row += 1
 
-        tb.Label(dialog, text="Название:").grid(row=1, column=0, sticky=tk.W, padx=10, pady=5)
+        tb.Label(dialog, text="Название:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
         name_var = tk.StringVar(value=old_name)
         name_entry = tb.Entry(dialog, textvariable=name_var, width=30)
-        name_entry.grid(row=1, column=1, padx=5, pady=5)
+        name_entry.grid(row=row, column=1, padx=5, pady=5)
         _bind_entry_context_menu(name_entry)
+        row += 1
+
+        tb.Label(dialog, text="Тип:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        type_var = tk.StringVar(value=old_type)
+        type_combo = tb.Combobox(dialog, textvariable=type_var, values=_TYPE_CHOICES, width=27, state="readonly")
+        type_combo.grid(row=row, column=1, padx=5, pady=5)
+        row += 1
+
+        tb.Label(dialog, text="Лотность:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        lot_var = tk.StringVar(value=old_lot)
+        lot_spin = tb.Spinbox(dialog, from_=1, to=9999, textvariable=lot_var, width=28, format="%d")
+        lot_spin.grid(row=row, column=1, padx=5, pady=5)
+        row += 1
+
+        tb.Label(dialog, text="Валюта:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        curr_var = tk.StringVar(value=old_curr)
+        curr_combo = tb.Combobox(dialog, textvariable=curr_var, values=_CURRENCY_CHOICES, width=27, state="readonly")
+        curr_combo.grid(row=row, column=1, padx=5, pady=5)
+        row += 1
 
         def on_ok():
             new_ticker = ticker_var.get().strip().upper()
             name = name_var.get().strip()
+            asset_type = type_var.get()
+            lot_size = lot_var.get()
+            currency = curr_var.get()
+            try:
+                lot_size = int(lot_size)
+            except ValueError:
+                lot_size = 1
             if not new_ticker:
                 messagebox.showwarning("Ошибка", "Введите тикер")
                 return
@@ -986,6 +1088,7 @@ class TickerRegistryTab(tb.Frame):
                 return
             try:
                 rename_ticker(old_ticker, new_ticker, name)
+                update_ticker_name(new_ticker, name, lot_size=lot_size, currency=currency, asset_type=asset_type)
             except ValueError as e:
                 messagebox.showwarning("Ошибка", str(e))
                 return
@@ -993,7 +1096,7 @@ class TickerRegistryTab(tb.Frame):
             self.refresh()
 
         btn_frame = tb.Frame(dialog)
-        btn_frame.grid(row=2, column=0, columnspan=2, pady=15)
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=15)
         tb.Button(btn_frame, text="Сохранить", command=on_ok, bootstyle="success").pack(side=tk.LEFT, padx=5)
         tb.Button(btn_frame, text="Отмена", command=dialog.destroy, bootstyle="secondary").pack(side=tk.LEFT, padx=5)
 
@@ -1010,6 +1113,70 @@ class TickerRegistryTab(tb.Frame):
             delete_ticker_name(ticker)
             self.refresh()
 
+    def _sync_from_moex(self):
+        """Обновить данные тикеров с Мосбиржи."""
+        sel = self.tree.selection()
+        if sel:
+            tickers = [self.tree.item(s)['tags'][0] for s in sel]
+        else:
+            tickers = [self.tree.item(c)['tags'][0] for c in self.tree.get_children()]
+
+        if not tickers:
+            messagebox.showinfo("Информация", "Нет тикеров для обновления.")
+            return
+
+        total = len(tickers)
+        ok_count = 0
+        fail_count = 0
+        failed_list = []
+        idx = 0
+
+        self._sync_status_var.set("Обновление...")
+
+        def _do_sync():
+            nonlocal ok_count, fail_count, idx
+            if idx >= total:
+                msg = f"Готово: {ok_count} OK, {fail_count} ошибок"
+                self._sync_status_var.set(msg)
+                self.refresh()
+                if failed_list:
+                    lines = [f"Не удалось обновить ({len(failed_list)}):"]
+                    for t, reason in failed_list:
+                        lines.append(f"  {t} — {reason}")
+                    messagebox.showwarning("Необновлённые тикеры", "\n".join(lines))
+                return
+
+            ticker = tickers[idx]
+            idx += 1
+            self._sync_status_var.set(f"{ticker} ({idx}/{total})...")
+
+            try:
+                data = fetch_ticker_static(ticker)
+                if data:
+                    update_ticker_from_moex(
+                        ticker,
+                        shortname=data.get("shortname", ''),
+                        currency=data.get("currency", ''),
+                        lot_size=data.get("lot_size", 1),
+                        asset_type=data.get("asset_type"),
+                    )
+                    ok_count += 1
+                else:
+                    fail_count += 1
+                    failed_list.append((ticker, "нет данных / снят с торгов"))
+            except Exception as e:
+                fail_count += 1
+                failed_list.append((ticker, str(e)))
+                print(f"[sync] Ошибка при {ticker}: {e}")
+
+            # Пауза между запросами к Мосбирже
+            if idx < total:
+                self.after(350, _do_sync)
+            else:
+                self.after(350, _do_sync)
+
+        self.after(500, _do_sync)
+
     def _export_tickers(self):
         """Экспорт тикеров в CSV-файл."""
         filepath = filedialog.asksaveasfilename(
@@ -1025,12 +1192,13 @@ class TickerRegistryTab(tb.Frame):
             return
         try:
             with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
-                f.write('Тикер;Название\n')
-                for ticker, name in rows:
+                f.write('Тикер;Название;Тип;Лотность;Валюта\n')
+                for ticker, name, asset_type, lot_size, currency in rows:
                     name = name or ''
                     if ';' in name:
                         name = '"' + name.replace('"', '""') + '"'
-                    f.write(f'{ticker};{name}\n')
+                    ui_type = _ui_type(asset_type)
+                    f.write(f'{ticker};{name};{ui_type};{lot_size or ""};{currency or ""}\n')
             messagebox.showinfo("Успех", f"Экспортировано {len(rows)} тикеров.\n{filepath}")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось экспортировать:\n{e}")
@@ -1055,15 +1223,38 @@ class TickerRegistryTab(tb.Frame):
             if not line:
                 continue
             parts = line.split(';')
-            if len(parts) < 2:
+            if len(parts) < 1:
                 continue
             if i == 0 and parts[0].strip() in ('Тикер', 'ticker', 'TICKER'):
                 continue
             ticker = parts[0].strip()
             name = parts[1].strip() if len(parts) > 1 else ''
+            # Тип — обратная совместимость: если введена заглавная буква, маппим
+            asset_type = ''
+            if len(parts) > 2:
+                raw = parts[2].strip().lower()
+                if raw in _TYPE_CHOICES:
+                    asset_type = raw
+                elif raw == 'акции' or raw.startswith('акц'):
+                    asset_type = 'акция'
+                elif raw == 'бонд' or raw.startswith('обл'):
+                    asset_type = 'облигация'
+                elif raw in ('etf', 'птф', 'зптф', 'бптф', 'фонд'):
+                    asset_type = 'etf'
+            lot_size = 1
+            if len(parts) > 3:
+                try:
+                    lot_size = int(parts[3].strip())
+                except (ValueError, TypeError):
+                    pass
+            currency = ''
+            if len(parts) > 4:
+                currency = parts[4].strip().upper()
+                if currency not in _CURRENCY_CHOICES:
+                    currency = ''
             if not ticker:
                 continue
-            rows.append((ticker, name))
+            rows.append((ticker, name, asset_type, lot_size, currency))
         if not rows:
             messagebox.showinfo("Импорт", "Файл не содержит данных для импорта.")
             return

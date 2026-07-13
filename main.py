@@ -7,7 +7,8 @@ import zipfile
 import glob
 import shutil
 from datetime import datetime
-from database import init_db, migrate_db, get_all_accounts, set_db_path, get_db_path
+from database import get_all_accounts, set_db_path, get_db_path
+from db_schema import init_schema
 from app_config import get_db_path as config_db_path
 from version import APP_NAME_RU, APP_VERSION
 from accounts_view import AccountsView
@@ -314,6 +315,5 @@ def main():
 
 if __name__ == "__main__":
     bootstrap_db()
-    init_db()
-    migrate_db()
+    init_schema()
     main()

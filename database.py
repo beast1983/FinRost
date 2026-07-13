@@ -11,9 +11,6 @@ else:
     _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(_APP_DIR, "investments.db")
 
-# Текущая версия схемы базы данных
-CURRENT_DB_VERSION = 2
-
 _TYPE_MAP = {
     'stock': 'Мос.Биржа',
     'crypto': 'Крипто биржа',
@@ -144,21 +141,52 @@ def upsert_ticker_name(ticker, name, cursor=None):
         conn.close()
 
 
+def _ticker_set_clause(extra_updates):
+    """Собрать строку SET для INSERT ... ON CONFLICT DO UPDATE с учётом старых и новых полей."""
+    clauses = [f"excluded.{k} = ticker_names.{k}" for k in extra_updates]
+    return ", ".join(clauses)
+
+
 def import_ticker_names(rows):
-    """Массовый импорт/обновление записей тикеров. rows: [(ticker, name), ...]."""
+    """Массовый импорт/обновление записей тикеров.
+
+    rows: список кортежей произвольной длины —
+      [(ticker,), (ticker, name), (ticker, name, type), (ticker, name, type, lot), (ticker, name, type, lot, currency), ...]
+    """
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        for ticker, name in rows:
-            ticker = ticker.strip().upper()
-            name = name.strip() if name else ''
+        for row in rows:
+            ticker = (row[0] or '').strip().upper()
             if not ticker:
                 continue
-            cursor.execute("""
-                INSERT INTO ticker_names (ticker, name) VALUES (?, ?)
-                ON CONFLICT(ticker) DO UPDATE SET name = excluded.name
-            """, (ticker, name))
-        count = len([1 for t, n in rows if t.strip()])
+            name = (row[1] or '').strip() if len(row) > 1 else ''
+            asset_type = (row[2] or '').strip() if len(row) > 2 else ''
+            lot_size = row[3] if len(row) > 3 else 1
+            try:
+                lot_size = int(lot_size) if lot_size else 1
+            except (ValueError, TypeError):
+                lot_size = 1
+            currency = (row[4] or '').strip() if len(row) > 4 else ''
+
+            # Формируем SET-кlausулы только для явно переданных колонок
+            set_clauses = []
+            if len(row) > 1 and name:
+                set_clauses.append("name = excluded.name")
+            if len(row) > 2 and asset_type:
+                set_clauses.append("asset_type = excluded.asset_type")
+            if len(row) > 3 and lot_size > 0:
+                set_clauses.append("lot_size = excluded.lot_size")
+            if len(row) > 4 and currency:
+                set_clauses.append("currency = excluded.currency")
+            set_str = ", ".join(set_clauses) or "name = excluded.name"
+
+            cursor.execute(f"""
+                INSERT INTO ticker_names (ticker, name, asset_type, lot_size, currency)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(ticker) DO UPDATE SET {set_str}
+            """, (ticker, name, asset_type, lot_size, currency))
+        count = len([r for r in rows if (r[0] or '').strip()])
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -169,35 +197,94 @@ def import_ticker_names(rows):
 
 
 def get_all_ticker_names():
-    """Получить все записи реестра: [(ticker, name), ...]."""
+    """Получить все записи реестра: [(ticker, name, asset_type, lot_size, currency), ...]."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT ticker, name FROM ticker_names ORDER BY ticker")
+    cursor.execute("SELECT ticker, name, asset_type, lot_size, currency FROM ticker_names ORDER BY ticker")
     rows = cursor.fetchall()
     conn.close()
     return rows
 
 
-def update_ticker_name(ticker, name):
-    """Обновить имя тикера."""
+def search_ticker_names(query, limit=3):
+    """Поиск тикеров по подстроке (case-insensitive, кириллица через Python .lower()).
+    Ищет по ticker и name. Сортировка: точное совпадение → starts-with ticker → starts-with name → contains.
+    Возвращает [(ticker, name, asset_type, lot_size, currency), ...] до limit шт.
+    """
+    q = (query or '').strip().lower()
+    if not q:
+        return []
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT ticker, name, asset_type, lot_size, currency FROM ticker_names")
+    rows = cursor.fetchall()
+    conn.close()
+
+    matches = []
+    for row in rows:
+        ticker = row[0]
+        name = row[1] or ''
+        ticker_lower = ticker.lower()
+        name_lower = name.lower()
+        if q not in ticker_lower and q not in name_lower:
+            continue
+        if ticker_lower == q:
+            priority = 0
+        elif ticker_lower.startswith(q):
+            priority = 1
+        elif name_lower.startswith(q):
+            priority = 2
+        else:
+            priority = 3
+        matches.append((priority, ticker_lower, row))
+
+    matches.sort(key=lambda x: (x[0], x[1]))
+    return [m[2] for m in matches[:limit]]
+
+
+def update_ticker_name(ticker, name, lot_size=None, currency=None, asset_type=None):
+    """Обновить имя тикера (и опционально lot_size, currency, asset_type)."""
     conn = get_connection()
     cursor = conn.cursor()
     ticker = str(ticker).strip().upper()
     name = str(name).strip() if name else ''
-    cursor.execute("UPDATE ticker_names SET name = ? WHERE ticker = ?", (name, ticker))
+    sets = ["name = ?"]
+    params = [name]
+    if lot_size is not None:
+        sets.append("lot_size = ?")
+        try:
+            params.append(int(lot_size))
+        except (ValueError, TypeError):
+            params.append(1)
+    if currency is not None:
+        sets.append("currency = ?")
+        params.append(str(currency).strip().upper() or '')
+    if asset_type is not None:
+        sets.append("asset_type = ?")
+        params.append(str(asset_type).strip() if asset_type else '')
+    params.append(ticker)
+    cursor.execute(f"UPDATE ticker_names SET {', '.join(sets)} WHERE ticker = ?", params)
     conn.commit()
     conn.close()
 
 
-def add_ticker_name(ticker, name):
+def add_ticker_name(ticker, name, asset_type='', lot_size=1, currency=''):
     """Добавить новую запись в реестр тикеров."""
     conn = get_connection()
     cursor = conn.cursor()
     ticker = str(ticker).strip().upper()
     name = str(name).strip() if name else ''
+    asset_type = str(asset_type).strip() if asset_type else ''
     try:
-        cursor.execute("INSERT INTO ticker_names (ticker, name) VALUES (?, ?)",
-                       (ticker, name))
+        lot_size = int(lot_size) if lot_size else 1
+    except (ValueError, TypeError):
+        lot_size = 1
+    currency = str(currency).strip().upper() if currency else ''
+    try:
+        cursor.execute(
+            "INSERT INTO ticker_names (ticker, name, asset_type, lot_size, currency) VALUES (?, ?, ?, ?, ?)",
+            (ticker, name, asset_type, lot_size, currency)
+        )
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
@@ -216,7 +303,10 @@ def delete_ticker_name(ticker):
 
 
 def rename_ticker(old_ticker, new_ticker, name):
-    """Переименовать тикер с каскадным обновлением всех связанных таблиц."""
+    """Переименовать тикер с каскадным обновлением всех связанных таблиц.
+
+    Поля asset_type, lot_size, currency переносятся как есть.
+    """
     conn = get_connection()
     cursor = conn.cursor()
     old_ticker = str(old_ticker).strip().upper()
@@ -229,8 +319,10 @@ def rename_ticker(old_ticker, new_ticker, name):
                 raise ValueError(f"Тикер {new_ticker} уже существует")
             for table in ('assets', 'buys', 'transactions', 'snapshot_assets'):
                 cursor.execute(f"UPDATE {table} SET ticker = ? WHERE ticker = ?", (new_ticker, old_ticker))
-            cursor.execute("UPDATE ticker_names SET ticker = ?, name = ? WHERE ticker = ?",
-                           (new_ticker, name, old_ticker))
+            cursor.execute(
+                "UPDATE ticker_names SET ticker = ?, name = ? WHERE ticker = ?",
+                (new_ticker, name, old_ticker)
+            )
         else:
             cursor.execute("UPDATE ticker_names SET name = ? WHERE ticker = ?", (name, old_ticker))
     except Exception as e:
@@ -250,252 +342,86 @@ def get_ticker_name(ticker):
     return row["name"] if row else None
 
 
-# ================================================================
-#  init_db
-# ================================================================
+def get_ticker_info(ticker):
+    """Получить полную информацию о тикере из реестра.
 
-def init_db():
-    """Инициализация таблиц базы данных."""
+    Returns:
+        dict или None: {ticker, name, asset_type, lot_size, currency}
+    """
     conn = get_connection()
     cursor = conn.cursor()
-
-    # ─── 0. Таблица валют ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS currencies (
-            id INTEGER PRIMARY KEY,
-            code TEXT NOT NULL UNIQUE,
-            name TEXT NOT NULL
-        )
-    """)
-    # Сидирование
-    currencies = [
-        (1, 'RUB', 'Российский рубль'),
-        (2, 'USD', 'Доллар США'),
-        (3, 'EUR', 'Евро'),
-        (4, 'CNY', 'Китайский юань'),
-    ]
-    for c in currencies:
-        cursor.execute(
-            "INSERT OR IGNORE INTO currencies (id, code, name) VALUES (?, ?, ?)", c
-        )
-
-    # ─── 1. Таблица счетов ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            account_number TEXT DEFAULT '',
-            broker_type TEXT NOT NULL DEFAULT 'stock',
-            active INTEGER NOT NULL DEFAULT 1,
-            currency_id INTEGER NOT NULL DEFAULT 1,
-            balance REAL NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (currency_id) REFERENCES currencies(id)
-        )
-    """)
-
-    # ─── 2. Таблица активов ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS assets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            name TEXT DEFAULT '',
-            asset_type TEXT NOT NULL,
-            quantity REAL NOT NULL,
-            avg_price REAL NOT NULL,
-            current_price REAL DEFAULT 0,
-            last_update TEXT,
-            broker_id INTEGER,
-            purchase_date TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            currency_id INTEGER NOT NULL DEFAULT 1,
-            coupon_percent REAL,
-            FOREIGN KEY (broker_id) REFERENCES accounts(id),
-            FOREIGN KEY (currency_id) REFERENCES currencies(id)
-        )
-    """)
-
-    # ─── 0b. Реестр тикеров ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ticker_names (
-            ticker TEXT PRIMARY KEY,
-            name TEXT NOT NULL DEFAULT ''
-        )
-    """)
-    # Миграция: заполнить из существующих активов
-    try:
-        cursor.execute("""
-            INSERT OR IGNORE INTO ticker_names (ticker, name)
-            SELECT ticker, name FROM assets
-            WHERE ticker != '' AND name IS NOT NULL AND name != ''
-        """)
-    except Exception:
-        pass
-
-    # ─── 3. Таблица покупок (лог каждой докупки) ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS buys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset_id INTEGER,
-            ticker TEXT NOT NULL,
-            quantity REAL NOT NULL,
-            price REAL NOT NULL,
-            currency_id INTEGER NOT NULL DEFAULT 1,
-            broker_id INTEGER,
-            buy_date TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (asset_id) REFERENCES assets(id),
-            FOREIGN KEY (broker_id) REFERENCES accounts(id),
-            FOREIGN KEY (currency_id) REFERENCES currencies(id)
-        )
-    """)
-
-    # ─── 4. Таблица настроек ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            setting_key TEXT PRIMARY KEY,
-            setting_value TEXT NOT NULL,
-            updated_at TEXT
-        )
-    """)
-
-    # ─── 5. Таблица истории портфеля (глобальный срез) ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS portfolio_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            total_value REAL NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    # ─── 6. Таблица срезов портфеля (по счёту, 1 запись в счёт за месяц) ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            account_id INTEGER NOT NULL,
-            balance_rub REAL DEFAULT 0,
-            assets_value_rub REAL DEFAULT 0,
-            portfolio_total_rub REAL DEFAULT 0,
-            deposits REAL DEFAULT 0,
-            withdrawals REAL DEFAULT 0,
-            dividends REAL DEFAULT 0,
-            coupons REAL DEFAULT 0,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (account_id) REFERENCES accounts(id)
-        )
-    """)
-
-    cursor.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_month_account
-        ON snapshots (strftime('%Y-%m', date), account_id)
-    """)
-
-    # ─── 7. Таблица транзакций ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            tx_type TEXT NOT NULL,
-            account_id INTEGER,
-            ticker TEXT DEFAULT '',
-            amount REAL NOT NULL,
-            currency_id INTEGER NOT NULL DEFAULT 1,
-            notes TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            asset_id INTEGER,
-            qty REAL,
-            price REAL,
-            profit REAL,
-            FOREIGN KEY (account_id) REFERENCES accounts(id),
-            FOREIGN KEY (asset_id) REFERENCES assets(id),
-            FOREIGN KEY (currency_id) REFERENCES currencies(id)
-        )
-    """)
-
-    # ─── 8. Таблица деталей среза ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS snapshot_assets (
-            snapshot_id INTEGER NOT NULL,
-            asset_id INTEGER,
-            ticker TEXT NOT NULL,
-            name TEXT DEFAULT '',
-            asset_type TEXT DEFAULT '',
-            quantity REAL NOT NULL,
-            avg_price REAL NOT NULL,
-            current_price REAL NOT NULL,
-            currency_id INTEGER NOT NULL DEFAULT 1,
-            fx_rate REAL DEFAULT 1,
-            value_rub REAL NOT NULL,
-            FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE,
-            FOREIGN KEY (asset_id) REFERENCES assets(id),
-            FOREIGN KEY (currency_id) REFERENCES currencies(id)
-        )
-    """)
-
-    # ─── 9. Таблица версии схемы БД ───
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS db_version (
-            version INTEGER
-        )
-    """)
-    cursor.execute("SELECT COUNT(*) as cnt FROM db_version")
-    if cursor.fetchone()["cnt"] == 0:
-        cursor.execute("INSERT INTO db_version VALUES (?)", (CURRENT_DB_VERSION,))
-
-    conn.commit()
-    conn.close()
-
-
-# ================================================================
-#  Migrations
-# ================================================================
-
-def migrate_db():
-    """Проверить версию схемы БД и применить миграции при необходимости."""
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # Проверить наличие таблицы db_version
-    cursor.execute("""
-        SELECT name FROM sqlite_master
-        WHERE type='table' AND name='db_version'
-    """)
-    if not cursor.fetchone():
-        # Таблицы нет — создаём (база без версии)
-        cursor.execute("CREATE TABLE db_version (version INTEGER)")
-        cursor.execute("INSERT INTO db_version VALUES (?)", (CURRENT_DB_VERSION,))
-        conn.commit()
-        conn.close()
-        print(f"[migrate_db] Схема инициализирована на версии {CURRENT_DB_VERSION}")
-        return
-
-    cursor.execute("SELECT version FROM db_version LIMIT 1")
+    cursor.execute("SELECT ticker, name, asset_type, lot_size, currency FROM ticker_names WHERE ticker = ?",
+                    (str(ticker).strip().upper(),))
     row = cursor.fetchone()
-    current = row["version"] if row else 0
+    conn.close()
+    if row:
+        return {
+            "ticker": row["ticker"],
+            "name": row["name"] or '',
+            "asset_type": row["asset_type"] or '',
+            "lot_size": row["lot_size"] if row["lot_size"] else 1,
+            "currency": row["currency"] or '',
+        }
+    return None
 
-    if current >= CURRENT_DB_VERSION:
-        conn.close()
-        print(f"[migrate_db] Версия БД актуальна: {current}")
-        return
 
-    print(f"[migrate_db] Текущая версия БД: {current}, целевая: {CURRENT_DB_VERSION}")
+def update_ticker_from_moex(ticker, shortname, currency, lot_size, asset_type=None):
+    """Обновить запись тикера данными из Мосбиржи.
 
-    # ─── Миграции (применяются по очереди) ───
-    if current < 2:
-        cursor.execute("ALTER TABLE assets ADD COLUMN face_value REAL DEFAULT 1000")
-        cursor.execute("ALTER TABLE assets ADD COLUMN lot_size INTEGER DEFAULT 1")
-        cursor.execute("ALTER TABLE assets ADD COLUMN lot_value REAL DEFAULT 1000")
-        cursor.execute("ALTER TABLE assets ADD COLUMN list_level INTEGER")
-        cursor.execute("ALTER TABLE assets ADD COLUMN coupon_percent REAL")
-        cursor.execute("UPDATE db_version SET version = 2")
-        current = 2
-        print("[migrate_db] Применена миграция до версии 2")
+    Args:
+        ticker: тикер (верхний регистр)
+        shortname: SHORTNAME с биржи (перезапишет name если отличается)
+        currency: валюта (SUR→RUB уже должно быть сделано вызывающим)
+        lot_size: лотность (int)
+        asset_type: тип ('акция'/'облигация'/'etf') — None = не трогать
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    ticker = str(ticker).strip().upper()
+    shortname = str(shortname).strip() if shortname else ''
+    currency = str(currency).strip().upper() if currency else ''
+    try:
+        lot_size = int(lot_size) if lot_size else 1
+    except (ValueError, TypeError):
+        lot_size = 1
 
+    # Проверим, существует ли тикер
+    cursor.execute("SELECT name, asset_type, lot_size, currency FROM ticker_names WHERE ticker = ?", (ticker,))
+    existing = cursor.fetchone()
+    if not existing:
+        # Создаём новую запись
+        sets = ["name = ?", "lot_size = ?", "currency = ?"]
+        params = [shortname, lot_size, currency]
+        if asset_type:
+            sets.append("asset_type = ?")
+            params.append(asset_type)
+        params.append(ticker)
+        cursor.execute(f"INSERT INTO ticker_names (ticker, name, asset_type, lot_size, currency) VALUES (?, ?, ?, ?, ?)",
+                        (ticker, shortname, asset_type or '', lot_size, currency))
+    else:
+        sets = []
+        params = []
+        # name обновляем если отличается
+        if shortname and shortname != existing["name"]:
+            sets.append("name = ?")
+            params.append(shortname)
+        # asset_type обновляем только если был пустой
+        if asset_type and not existing["asset_type"]:
+            sets.append("asset_type = ?")
+            params.append(asset_type)
+        # lot_size всегда обновляем если пришло значение
+        if lot_size > 0 and lot_size != existing["lot_size"]:
+            sets.append("lot_size = ?")
+            params.append(lot_size)
+        # currency обновляем если есть значение
+        if currency and currency != existing["currency"]:
+            sets.append("currency = ?")
+            params.append(currency)
+        if sets:
+            params.append(ticker)
+            cursor.execute(f"UPDATE ticker_names SET {', '.join(sets)} WHERE ticker = ?", params)
     conn.commit()
     conn.close()
-    print(f"[migrate_db] Миграции завершены. Версия: {current}")
 
 
 # ================================================================

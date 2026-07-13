@@ -6,10 +6,14 @@ from database import (
     update_asset_price, get_all_accounts, get_account, get_exchange_rates,
     get_asset, calculate_total_in_rubles, buy_more_asset,
     credit_coupon_or_dividend, get_currencies, get_currency_id,
-    get_ticker_name
+    get_ticker_name, get_ticker_info, search_ticker_names,
+    update_ticker_name, update_ticker_from_moex
 )
 from datetime import datetime
-from api_client import fetch_price, is_connected, _fetch_bond_static, _fetch_share_static
+from api_client import (
+    fetch_price, is_connected, _fetch_bond_static, _fetch_share_static,
+    fetch_ticker_static
+)
 from calendar_utils import create_date_entry
 from table_utils import apply_zebra
 
@@ -802,7 +806,7 @@ class AssetsView(tb.Frame):
 
         dialog = tb.Toplevel(self.master)
         dialog.title("Купить актив")
-        dialog.geometry("420x380")
+        dialog.geometry("520x380")
         dialog.transient(self.master)
         dialog.grab_set()
         self._center_on_parent(dialog)
@@ -845,6 +849,11 @@ class AssetsView(tb.Frame):
         info_frame.columnconfigure(1, weight=1)
         info_frame.columnconfigure(3, weight=1)
 
+        # Listbox для подсказок тикеров (под полем «Код», изначально скрыт)
+        suggestion_lb = tk.Listbox(info_frame, height=3,
+                                   activestyle='dotbox', font=('Segoe UI', 9),
+                                   exportselection=False)
+
         # Type combobox
         type_combo_var = tk.StringVar(value="акция")
         type_combo = tb.Combobox(info_frame, textvariable=type_combo_var,
@@ -863,7 +872,7 @@ class AssetsView(tb.Frame):
         balance_label = tb.Label(dialog, text="Доступно: —")
         balance_label.pack(pady=(2, 2))
 
-        # Input fields: quantity, price, date
+        # Input fields: quantity, price, lot, date
         input_frame = tb.Frame(dialog, padding=(10, 0))
         input_frame.pack(fill=tk.X)
 
@@ -872,18 +881,26 @@ class AssetsView(tb.Frame):
         qty_entry = tb.Entry(input_frame, textvariable=qty_var)
         qty_entry.grid(row=0, column=1, sticky=tk.EW, pady=5)
 
-        tb.Label(input_frame, text="Цена:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        tb.Label(input_frame, text="Цена:").grid(row=0, column=2, sticky=tk.W, padx=(10, 5), pady=5)
         price_var = tk.StringVar()
         price_entry = tb.Entry(input_frame, textvariable=price_var)
-        price_entry.grid(row=1, column=1, sticky=tk.EW, pady=5)
+        price_entry.grid(row=0, column=3, sticky=tk.EW, pady=5)
+
+        tb.Label(input_frame, text="Лотность:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        lot_var = tk.StringVar()
+        lot_entry = tb.Entry(input_frame, textvariable=lot_var)
+        lot_entry.grid(row=1, column=1, sticky=tk.EW, pady=5)
+        refresh_btn = tb.Button(input_frame, text="Обновить", command=lambda: None, bootstyle="info")
+        refresh_btn.grid(row=1, column=3, sticky=tk.E, pady=5)
 
         tb.Label(input_frame, text="Дата покупки:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=5)
         date_entry = create_date_entry(input_frame, initial_date=datetime.now().date())
-        date_entry.grid(row=2, column=1, sticky=tk.EW, pady=5)
+        date_entry.grid(row=2, column=1, columnspan=3, sticky=tk.EW, pady=5)
 
         input_frame.columnconfigure(1, weight=1)
+        input_frame.columnconfigure(3, weight=1)
 
-        for w in [qty_entry, price_entry]:
+        for w in [qty_entry, price_entry, lot_entry]:
             _bind_entry_context_menu(w)
 
         # ---- Helpers ----
@@ -933,6 +950,7 @@ class AssetsView(tb.Frame):
                 type_combo_var.set("акция")
                 currency_combo_var.set("RUB")
                 asset_id_var.set("")
+                lot_var.set("")
             else:
                 _set_fields_editable(False)
                 broker = None
@@ -950,21 +968,228 @@ class AssetsView(tb.Frame):
                         info_fields["currency"].set(a["currency_code"] or "RUB")
                         type_combo_var.set(a["asset_type"])
                         currency_combo_var.set(a["currency_code"] or "RUB")
+                        # Лотность из реестра
+                        info = get_ticker_info(a["ticker"])
+                        lot_var.set(str(info["lot_size"]) if info and info.get("lot_size") else "")
                         break
 
+        _TYPE_UI_MAP = {'акция': 'акция', 'облигация': 'облигация', 'etf': 'etf'}
+
         def _on_ticker_autofill(*_):
-            """Автоподстановка названия тикера из реестра."""
+            """Автоподстановка name / asset_type / currency / lot из реестра тикеров."""
             ticker = info_fields["ticker"].get().strip()
             if not ticker:
                 return
-            # Подставляем только если имя ещё не введено
-            if info_fields["name"].get().strip():
+            info = get_ticker_info(ticker)
+            if not info:
                 return
-            name = get_ticker_name(ticker)
-            if name:
-                info_fields["name"].set(name)
+            # name — только если пусто
+            if not info_fields["name"].get().strip():
+                if info.get("name"):
+                    info_fields["name"].set(info["name"])
+            # asset_type — только если ещё не выбран
+            if not type_combo_var.get():
+                at = info.get("asset_type", '')
+                if at in _TYPE_UI_MAP:
+                    type_combo_var.set(at)
+            # currency — только если ещё не выбран
+            if not currency_combo_var.get():
+                cur = info.get("currency", '')
+                if cur:
+                    currency_combo_var.set(cur)
+            # lot_size — из реестра
+            lot_size = info.get("lot_size")
+            if lot_size:
+                lot_var.set(str(lot_size))
 
         info_fields["ticker"].trace_add("write", _on_ticker_autofill)
+
+        def _persist_ticker_registry():
+            """Сохранить актуальные поля тикера в реестр (ticker_names)."""
+            ticker = info_fields["ticker"].get().strip()
+            if not ticker:
+                return
+            name = info_fields["name"].get().strip()
+            asset_type = type_combo_var.get()
+            currency = currency_combo_var.get()
+            lot_val = lot_var.get().strip()
+            try:
+                lot_size = int(float(lot_val)) if lot_val else 1
+            except (ValueError, TypeError):
+                lot_size = 1
+            try:
+                update_ticker_name(ticker, name, lot_size=lot_size,
+                                   currency=currency, asset_type=asset_type)
+            except Exception:
+                pass
+
+        def _on_refresh_moex():
+            """Загрузить данные тикера с Мосбиржи: название, лотность, валюта, цена."""
+            ticker = info_fields["ticker"].get().strip()
+            asset_type = type_combo_var.get()
+            if not ticker or not asset_type:
+                messagebox.showwarning("Не выбрано", "Код и тип не выбраны")
+                return
+            if not is_connected():
+                messagebox.showwarning("Нет интернета", "Нет подключения к интернету")
+                return
+            try:
+                static = fetch_ticker_static(ticker)
+                price, _ = fetch_price(ticker, asset_type)
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось получить данные:\n{e}")
+                return
+            if not static and price is None:
+                messagebox.showwarning("Не найдено", f"Данные для {ticker} не найдены на бирже")
+                return
+            if static:
+                shortname = static.get("shortname") or ""
+                if shortname:
+                    info_fields["name"].set(shortname)
+                lot_size = static.get("lot_size")
+                if lot_size:
+                    lot_var.set(str(lot_size))
+                cur = static.get("currency")
+                if cur:
+                    currency_combo_var.set(cur)
+                at = static.get("asset_type")
+                if at and at in _TYPE_UI_MAP:
+                    type_combo_var.set(at)
+                try:
+                    update_ticker_from_moex(ticker, shortname, cur or '',
+                                            lot_size or 1, at or '')
+                except Exception:
+                    pass
+            if price is not None:
+                price_var.set(str(price))
+            messagebox.showinfo("Обновлено", f"Данные для {ticker} загружены с биржи")
+
+        refresh_btn.config(command=_on_refresh_moex)
+
+        # --- Тикер: подсказки из реестра (inline Listbox) ---
+        _search_timer_ref = [None]
+        _hide_timer_ref = [None]
+        _last_results = [None]
+
+        def _hide_suggestions():
+            if _search_timer_ref[0] is not None:
+                try:
+                    dialog.after_cancel(_search_timer_ref[0])
+                except Exception:
+                    pass
+                _search_timer_ref[0] = None
+            if _hide_timer_ref[0] is not None:
+                try:
+                    dialog.after_cancel(_hide_timer_ref[0])
+                except Exception:
+                    pass
+                _hide_timer_ref[0] = None
+            suggestion_lb.place_forget()
+
+        def _select_suggestion(event=None):
+            if _hide_timer_ref[0] is not None:
+                dialog.after_cancel(_hide_timer_ref[0])
+                _hide_timer_ref[0] = None
+            try:
+                idx = suggestion_lb.curselection()[0]
+            except IndexError:
+                return
+            results = _last_results[0]
+            if results and idx < len(results):
+                info = results[idx]
+                info_fields["ticker"].set(info[0])
+                if info[1]:
+                    info_fields["name"].set(info[1])
+                at = info[2]
+                lot_sz = info[3]
+                cur = info[4]
+                if at and at in _TYPE_UI_MAP:
+                    type_combo_var.set(at)
+                if lot_sz:
+                    lot_var.set(str(lot_sz))
+                if cur:
+                    currency_combo_var.set(cur)
+            _hide_suggestions()
+
+        def _on_listbox_press(event):
+            if _hide_timer_ref[0] is not None:
+                dialog.after_cancel(_hide_timer_ref[0])
+                _hide_timer_ref[0] = None
+
+        def _on_listbox_release(event):
+            idx = suggestion_lb.nearest(event.y)
+            if 0 <= idx < suggestion_lb.size():
+                suggestion_lb.selection_clear(0, tk.END)
+                suggestion_lb.selection_set(idx)
+                _select_suggestion()
+
+        def _show_suggestions(event=None):
+            ticker_val = info_fields["ticker"].get().strip()
+            if not ticker_val:
+                _hide_suggestions()
+                return
+            if _search_timer_ref[0] is not None:
+                try:
+                    dialog.after_cancel(_search_timer_ref[0])
+                except Exception:
+                    pass
+            _search_timer_ref[0] = dialog.after(250, lambda: _do_search(ticker_val))
+
+        def _do_search(query):
+            _search_timer_ref[0] = None
+            results = search_ticker_names(query, limit=3)
+            if not results:
+                _hide_suggestions()
+                return
+            _last_results[0] = results
+
+            suggestion_lb.delete(0, tk.END)
+            for ticker, name, asset_type, lot_size, currency in results:
+                display = f"{ticker} · {name}" if name else ticker
+                suggestion_lb.insert(tk.END, display)
+
+            info_frame.update_idletasks()
+            entry = info_entries["ticker"]
+            x = entry.winfo_x()
+            y = entry.winfo_y() + entry.winfo_height()
+            width = info_frame.winfo_width() - x
+            suggestion_lb.place(x=x, y=y, width=width, bordermode=tk.OUTSIDE)
+            suggestion_lb.lift()
+
+            if suggestion_lb.size() > 0:
+                suggestion_lb.selection_clear(0, tk.END)
+                suggestion_lb.selection_set(0)
+
+        def _on_entry_key(event):
+            if not suggestion_lb.winfo_ismapped():
+                return
+            if event.keysym in ('Up', 'Down', 'Return', 'Escape'):
+                if event.keysym == 'Up':
+                    cur = suggestion_lb.curselection()
+                    new_idx = max(0, (cur[0] - 1) if cur else 0)
+                    suggestion_lb.selection_clear(0, tk.END)
+                    suggestion_lb.selection_set(new_idx)
+                    suggestion_lb.see(new_idx)
+                elif event.keysym == 'Down':
+                    cur = suggestion_lb.curselection()
+                    new_idx = min(suggestion_lb.size() - 1, (cur[0] + 1) if cur else 0)
+                    suggestion_lb.selection_clear(0, tk.END)
+                    suggestion_lb.selection_set(new_idx)
+                    suggestion_lb.see(new_idx)
+                elif event.keysym == 'Return':
+                    _select_suggestion()
+                elif event.keysym == 'Escape':
+                    _hide_suggestions()
+                return 'break'
+
+        def _on_entry_focusout(event=None):
+            _hide_timer_ref[0] = dialog.after(250, _hide_suggestions)
+
+        suggestion_lb.bind('<ButtonPress-1>', _on_listbox_press)
+        suggestion_lb.bind('<ButtonRelease-1>', _on_listbox_release)
+        info_entries["ticker"].bind('<KeyRelease>', _show_suggestions)
+        info_entries["ticker"].bind('<Key>', _on_entry_key)
+        info_entries["ticker"].bind('<FocusOut>', _on_entry_focusout)
 
         # ---- Initial state ----
         _refresh_asset_list()
@@ -1022,6 +1247,7 @@ class AssetsView(tb.Frame):
                 account_id = account_options.get(acct_name)
                 result, success, msg = buy_more_asset(aid, qty, price, buy_date, account_id=account_id)
                 if success:
+                    _persist_ticker_registry()
                     messagebox.showinfo("Успех",
                                         f"{result['ticker']}: докуплено.\n"
                                         f"Новое количество: {result['new_qty']:.2f}\n"
@@ -1079,6 +1305,7 @@ class AssetsView(tb.Frame):
                 result, success, msg = add_asset(ticker, asset_type, qty, price, buy_date,
                                                   account_id=account_id, name=name, currency_code=currency)
                 if success:
+                    _persist_ticker_registry()
                     messagebox.showinfo("Успех", f"Актив {ticker} добавлен\n{msg}")
                 else:
                     messagebox.showerror("Ошибка", msg)
