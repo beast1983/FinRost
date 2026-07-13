@@ -17,6 +17,11 @@ from database import (
     get_exchange_rates,
     get_deal_transactions,
 )
+from performance import (
+    xirr,
+    twr_series,
+    build_xirr_cashflows,
+)
 from table_utils import apply_zebra
 
 MONTHS_RU = [
@@ -509,11 +514,11 @@ class IncomeTab(tb.Frame):
 
 
 # ═══════════════════════════════════════════════════════════
-#  Вкладка «Эффективность»
+#  Вкладка «Финрез» (Финансовый результат)
 # ═══════════════════════════════════════════════════════════
 
 class DealsTab(tb.Frame):
-    """Вкладка эффективности (покупки и продажи)."""
+    """Вкладка финансового результата (покупки и продажи)."""
 
     def __init__(self, parent, controller=None):
         super().__init__(parent)
@@ -570,7 +575,7 @@ class DealsTab(tb.Frame):
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
         # Таблица
-        table_frame = tb.LabelFrame(self, text="Эффективность", padx=5, pady=5)
+        table_frame = tb.LabelFrame(self, text="Финрез", padx=5, pady=5)
         table_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
 
         columns = ('date', 'ticker', 'name', 'tx_type', 'qty', 'price',
@@ -689,9 +694,9 @@ class DealsTab(tb.Frame):
         self.ax.clear()
         if month_names:
             if year_from == year_to:
-                chart_title = f"Эффективность — {year_from} г."
+                chart_title = f"Финрез — {year_from} г."
             else:
-                chart_title = f"Эффективность — {year_from}–{year_to} г."
+                chart_title = f"Финрез — {year_from}–{year_to} г."
             self.ax.set_title(chart_title, fontsize=12)
 
             x = list(range(len(month_names)))
@@ -839,6 +844,197 @@ class DealsTab(tb.Frame):
 
 
 # ═══════════════════════════════════════════════════════════
+#  Вкладка «Эффективность» (TWR / XIRR)
+# ═══════════════════════════════════════════════════════════
+
+class PerformanceTab(tb.Frame):
+    """Вкладка эффективности: TWR (линия) и XIRR (цифра)."""
+
+    def __init__(self, parent, controller=None):
+        super().__init__(parent)
+        self.controller = controller
+        self._create_ui()
+        self._update_filters()
+        self.refresh()
+
+    # ── получение ID счёта ──────────────────────────────────────
+
+    def _get_account_filter(self):
+        if self.controller and hasattr(self.controller, 'selected_account_id'):
+            aid = self.controller.selected_account_id.get()
+            if aid > 0:
+                return aid
+        return 'all'
+
+    # ── создание интерфейса ──────────────────────────────────────
+
+    def _create_ui(self):
+        # Фильтры
+        filter_frame = tb.Frame(self)
+        filter_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+        tb.Label(filter_frame, text="Период:").pack(side=tk.LEFT, padx=(0, 4))
+        self.year_from_combo = tb.Combobox(
+            filter_frame, state="readonly", width=8, justify=tk.CENTER,
+        )
+        self.year_from_combo.pack(side=tk.LEFT, padx=(0, 2))
+        tb.Label(filter_frame, text="—").pack(side=tk.LEFT, padx=2)
+        self.year_to_combo = tb.Combobox(
+            filter_frame, state="readonly", width=8, justify=tk.CENTER,
+        )
+        self.year_to_combo.pack(side=tk.LEFT, padx=(0, 15))
+        self.year_from_combo.bind('<<ComboboxSelected>>', lambda e: self.refresh())
+        self.year_to_combo.bind('<<ComboboxSelected>>', lambda e: self.refresh())
+
+        # Карточки метрик: XIRR (слева) и TWR (справа)
+        metrics_frame = tb.Frame(self)
+        metrics_frame.pack(fill=tk.X, padx=10, pady=(5, 5))
+
+        xirr_card = tb.LabelFrame(metrics_frame, text="Внутренняя доходность (XIRR)", padx=12, pady=12)
+        xirr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.xirr_value_label = tb.Label(
+            xirr_card, text="—", font=("Segoe UI", 22, "bold"),
+            bootstyle="secondary", anchor=tk.CENTER,
+        )
+        self.xirr_value_label.pack(fill=tk.X)
+        tb.Label(xirr_card, text="годовых", anchor=tk.CENTER,
+                 bootstyle="secondary").pack(fill=tk.X)
+
+        twr_card = tb.LabelFrame(metrics_frame, text="Чистый прирост активов (TWR)", padx=12, pady=12)
+        twr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        self.twr_value_label = tb.Label(
+            twr_card, text="—", font=("Segoe UI", 22, "bold"),
+            bootstyle="secondary", anchor=tk.CENTER,
+        )
+        self.twr_value_label.pack(fill=tk.X)
+        tb.Label(twr_card, text="за период", anchor=tk.CENTER,
+                 bootstyle="secondary").pack(fill=tk.X)
+
+        # График TWR
+        chart_frame = tb.Frame(self)
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
+
+        self.figure = Figure(figsize=(8, 4))
+        self.ax = self.figure.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=chart_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    # ── фильтры ──────────────────────────────────────────────────
+
+    def _update_filters(self):
+        current_year = str(datetime.now().year)
+        from_val = self.year_from_combo.get() if self.year_from_combo['values'] else ''
+        to_val = self.year_to_combo.get() if self.year_to_combo['values'] else ''
+
+        years = get_snapshot_years()
+        self.year_from_combo['values'] = years
+        self.year_to_combo['values'] = years
+        if not from_val or from_val not in years:
+            from_val = current_year if current_year in years else years[0] if years else current_year
+        if not to_val or to_val not in years:
+            to_val = current_year if current_year in years else years[0] if years else current_year
+        self.year_from_combo.set(from_val)
+        self.year_to_combo.set(to_val)
+
+    # ── обновление данных ────────────────────────────────────────
+
+    def refresh(self):
+        year_from = self.year_from_combo.get()
+        year_to = self.year_to_combo.get()
+
+        if not year_from or not year_to:
+            return
+        if int(year_from) > int(year_to):
+            messagebox.showwarning("Неверный период", "Год «С» не может быть больше года «По»")
+            return
+
+        account_id = self._get_account_filter()
+        rows, prev_total = get_analysis_monthly(year_from, year_to, account_id)
+
+        self.ax.clear()
+
+        if not rows:
+            self.xirr_value_label.configure(text="—", bootstyle="secondary")
+            self.twr_value_label.configure(text="—", bootstyle="secondary")
+            self.ax.set_title("Нет данных за выбранный период", fontsize=12)
+            self.ax.set_xticks([])
+            self.ax.set_yticks([])
+            self.figure.tight_layout()
+            self.canvas.draw()
+            return
+
+        # ── TWR: накопительный ряд и итог ──
+        twr_points, twr_total = twr_series(rows, prev_total)
+
+        # ── XIRR: денежные потоки ──
+        # prev_total — стоимость портфеля на конец декабря года, предшествующего периоду
+        start_ym = f"{int(year_from) - 1}-12"
+        cashflows = build_xirr_cashflows(rows, prev_total, start_ym)
+        xirr_rate = xirr(cashflows)
+
+        # ── Карточки ──
+        if xirr_rate is not None:
+            self.xirr_value_label.configure(
+                text=f"{xirr_rate * 100:+.2f} %",
+                bootstyle="success" if xirr_rate >= 0 else "danger",
+            )
+        else:
+            self.xirr_value_label.configure(text="—", bootstyle="secondary")
+
+        self.twr_value_label.configure(
+            text=f"{twr_total * 100:+.2f} %",
+            bootstyle="success" if twr_total >= 0 else "danger",
+        )
+
+        # ── График накопительного TWR ──
+        months = []
+        year_labels = []
+        values = []
+        for ym, pct in twr_points:
+            mn = int(ym.split('-')[1])
+            yr = ym[:4]
+            months.append(MONTHS_RU[mn - 1])
+            year_labels.append(yr)
+            values.append(pct)
+
+        x = list(range(len(months)))
+        line_color = 'green' if twr_total >= 0 else 'red'
+        self.ax.plot(x, values, color=line_color, linewidth=2, marker='o', markersize=4)
+        self.ax.fill_between(x, values, 0, color=line_color, alpha=0.12)
+        self.ax.axhline(y=0, color='black', linewidth=0.5)
+
+        if year_from == year_to:
+            chart_title = f"Изменение доходности портфеля (TWR, %) — {year_from} г."
+        else:
+            chart_title = f"Изменение доходности портфеля (TWR, %) — {year_from}–{year_to} г."
+        self.ax.set_title(chart_title, fontsize=12)
+
+        # Разделители годов
+        unique_years = []
+        for y in year_labels:
+            if not unique_years or unique_years[-1] != y:
+                unique_years.append(y)
+        if len(unique_years) > 1:
+            bt = blended_transform_factory(self.ax.transData, self.ax.transAxes)
+            for i in range(len(months)):
+                if year_labels[i] != unique_years[0] and year_labels[i] != year_labels[i - 1]:
+                    px = i - 0.5
+                    self.ax.axvline(x=px, color='gray', linewidth=0.8, alpha=0.7)
+                    self.ax.text(px, -0.15, str(year_labels[i]),
+                                 transform=bt, ha='center', va='top', fontsize=9,
+                                 fontweight='bold')
+
+        self.ax.set_xticks(x)
+        self.ax.set_xticklabels(months, rotation=45, ha='right', fontsize=8)
+        self.ax.set_ylabel('TWR, %')
+        self.ax.grid(True, alpha=0.3)
+        self.ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v:.0f} %"))
+        self.ax.tick_params(axis='y', labelsize=7)
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+
+# ═══════════════════════════════════════════════════════════
 #  AnalysisView — корневая вкладка с Notebook
 # ═══════════════════════════════════════════════════════════
 
@@ -854,10 +1050,12 @@ class AnalysisView(tb.Frame):
         self.dynamics_tab = DynamicsTab(notebook, controller=self.controller)
         self.income_tab = IncomeTab(notebook, controller=self.controller)
         self.deals_tab = DealsTab(notebook, controller=self.controller)
+        self.perf_tab = PerformanceTab(notebook, controller=self.controller)
 
         notebook.add(self.dynamics_tab, text="Динамика портфеля")
         notebook.add(self.income_tab, text="Доходы")
-        notebook.add(self.deals_tab, text="Эффективность")
+        notebook.add(self.deals_tab, text="Финрез")
+        notebook.add(self.perf_tab, text="Эффективность")
 
         self.notebook = notebook
 
@@ -867,16 +1065,19 @@ class AnalysisView(tb.Frame):
     def _on_tab_change(self):
         """Обновить данные при переключении вкладки."""
         tab_id = self.notebook.index(self.notebook.select())
-        tabs = [self.dynamics_tab, self.income_tab, self.deals_tab]
+        tabs = [self.dynamics_tab, self.income_tab, self.deals_tab, self.perf_tab]
         if tab_id == 0:
             self.dynamics_tab.refresh()
         elif tab_id == 1:
             self.income_tab.refresh()
         elif tab_id == 2:
             self.deals_tab.refresh()
+        elif tab_id == 3:
+            self.perf_tab.refresh()
 
     def refresh(self):
         """Обновить все вкладки."""
         self.dynamics_tab.refresh()
         self.income_tab.refresh()
         self.deals_tab.refresh()
+        self.perf_tab.refresh()
