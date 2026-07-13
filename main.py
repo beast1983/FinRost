@@ -222,26 +222,39 @@ class InvestmentApp:
                     self.selected_account_id.set(a["id"])
                     break
 
-        # Обновляем активы/транзакции если на соответствующих вкладках
-        if hasattr(self, 'assets_view'):
-            account_id = self.selected_account_id.get()
-            account_id = account_id if account_id > 0 else None
-            self.assets_view.set_broker(account_id)
-            self.assets_view.refresh()
+        account_id = self.selected_account_id.get()
+        account_id = account_id if account_id > 0 else None
 
-        if hasattr(self, 'transactions_view'):
-            self.transactions_view.refresh()
+        # Обновляем активы/транзакции если на соответствующих вкладках.
+        # Проверяем и существование атрибута (он обнуляется в clear_content),
+        # и живость виджета (winfo_exists) — защита от уничтоженных вкладок.
+        assets_view = getattr(self, 'assets_view', None)
+        if assets_view is not None and assets_view.winfo_exists():
+            assets_view.set_broker(account_id)
+            assets_view.refresh()
 
-        if hasattr(self, 'cuts_view'):
-            self.cuts_view.refresh()
+        transactions_view = getattr(self, 'transactions_view', None)
+        if transactions_view is not None and transactions_view.winfo_exists():
+            transactions_view.refresh()
 
-        if hasattr(self, 'analysis_view'):
-            self.analysis_view.refresh()
+        cuts_view = getattr(self, 'cuts_view', None)
+        if cuts_view is not None and cuts_view.winfo_exists():
+            cuts_view.refresh()
+
+        analysis_view = getattr(self, 'analysis_view', None)
+        if analysis_view is not None and analysis_view.winfo_exists():
+            analysis_view.refresh()
 
     def clear_content(self):
         """Очистка правой части."""
         for widget in self.content_frame.winfo_children():
             widget.destroy()
+        # Обнуляем ссылки на представления, чтобы обработчики смены счёта
+        # не пытались обновить уже уничтоженные (TclError: invalid command name).
+        for name in ('accounts_view', 'assets_view', 'transactions_view',
+                     'cuts_view', 'analysis_view', 'settings_view'):
+            if hasattr(self, name):
+                setattr(self, name, None)
 
     def show_accounts(self):
         """Показать вкладку депозитных счетов."""
