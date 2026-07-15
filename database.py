@@ -701,13 +701,14 @@ def compute_amount_in_account_currency(amount, asset_code, account_code, rates):
 
 
 def add_asset(ticker, asset_type, quantity, price, purchase_date, account_id=None,
-              name='', currency_code='RUB'):
+              name='', currency_code='RUB', lot_size=1):
     """Добавление актива."""
     currency_id = get_currency_id(currency_code)
     conn = get_connection()
     cursor = conn.cursor()
     price = round_price(price)
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ls = lot_size if lot_size and lot_size > 0 else 1
 
     # Регистрируем тикер в справочнике
     upsert_ticker_name(ticker, name, cursor=cursor)
@@ -715,7 +716,7 @@ def add_asset(ticker, asset_type, quantity, price, purchase_date, account_id=Non
     if asset_type == "облигация":
         purchase_sum = quantity * price * 1000 / 100
     else:
-        purchase_sum = quantity * price
+        purchase_sum = quantity * ls * price
 
     acc_currency_id = currency_id
     if account_id is not None:
@@ -744,8 +745,8 @@ def add_asset(ticker, asset_type, quantity, price, purchase_date, account_id=Non
     cursor.execute("""
         INSERT INTO assets
             (ticker, name, asset_type, quantity, avg_price, broker_id, purchase_date, created_at, currency_id, face_value, lot_size, lot_value, list_level)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1000, 1, 1000, NULL)
-    """, (ticker, name, asset_type, quantity, price, account_id, purchase_date, created_at, currency_id))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1000, ?, 1000, NULL)
+    """, (ticker, name, asset_type, quantity, price, account_id, purchase_date, created_at, currency_id, ls))
     asset_id = cursor.lastrowid
 
     if account_id is not None:
@@ -882,13 +883,14 @@ def sell_asset(asset_id, sell_price, sell_date, quantity=None):
     if sold_qty > asset_quantity:
         sold_qty = asset_quantity
 
+    ls = asset["lot_size"] if asset["lot_size"] and asset["lot_size"] > 0 else 1
     if asset["asset_type"] == "облигация":
         fv = asset["face_value"] or 1000
         sell_sum = sell_price * sold_qty * fv / 100
         profit = (sell_price - asset["avg_price"]) * sold_qty * fv / 100
     else:
-        sell_sum = sell_price * sold_qty
-        profit = (sell_price - asset["avg_price"]) * sold_qty
+        sell_sum = sell_price * sold_qty * ls
+        profit = (sell_price - asset["avg_price"]) * sold_qty * ls
 
     asset_currency_id = asset["currency_id"]
     asset_currency_code = get_currency_code(asset_currency_id)
@@ -945,7 +947,7 @@ def sell_asset(asset_id, sell_price, sell_date, quantity=None):
     return result, True, msg
 
 
-def buy_more_asset(asset_id, add_qty, buy_price, buy_date, account_id=None):
+def buy_more_asset(asset_id, add_qty, buy_price, buy_date, account_id=None, lot_size=None):
     """Докупка актива. Если account_id указан — используется он; иначе берётся broker_id актива."""
     conn = get_connection()
     cursor = conn.cursor()
@@ -964,15 +966,20 @@ def buy_more_asset(asset_id, add_qty, buy_price, buy_date, account_id=None):
     effective_account_id = account_id if account_id is not None else asset["broker_id"]
     asset_currency_id = asset["currency_id"]
     asset_currency_code = get_currency_code(asset_currency_id)
+    ls = asset["lot_size"] if asset["lot_size"] and asset["lot_size"] > 0 else (lot_size or 1)
 
     if asset["asset_type"] == "облигация":
         fv = asset["face_value"] or 1000
         purchase_sum = add_qty * buy_price * fv / 100
     else:
-        purchase_sum = add_qty * buy_price
+        purchase_sum = add_qty * ls * buy_price
 
     # Регистрируем тикер в справочнике
     upsert_ticker_name(asset["ticker"], asset["name"] or "", cursor=cursor)
+
+    # Обновляем lot_size актива, если пришёл новый из формы
+    if lot_size is not None and ls == lot_size and asset["lot_size"] != lot_size:
+        cursor.execute("UPDATE assets SET lot_size = ? WHERE id = ?", (lot_size, asset_id))
 
     acc_currency_id = asset_currency_id
     if effective_account_id is not None:

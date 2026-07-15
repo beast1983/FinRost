@@ -886,6 +886,16 @@ class PerformanceTab(tb.Frame):
         self.year_from_combo.bind('<<ComboboxSelected>>', lambda e: self.refresh())
         self.year_to_combo.bind('<<ComboboxSelected>>', lambda e: self.refresh())
 
+        # Переключатель вида графика
+        tb.Label(filter_frame, text="Вид:").pack(side=tk.LEFT, padx=(0, 4))
+        self.view_combo = tb.Combobox(
+            filter_frame, state="readonly", width=12, justify=tk.CENTER,
+            values=["График", "По месяцам"],
+        )
+        self.view_combo.set("График")
+        self.view_combo.pack(side=tk.LEFT, padx=(0, 15))
+        self.view_combo.bind('<<ComboboxSelected>>', lambda e: self._draw_chart())
+
         # Карточки метрик: XIRR (слева) и TWR (справа)
         metrics_frame = tb.Frame(self)
         metrics_frame.pack(fill=tk.X, padx=10, pady=(5, 5))
@@ -951,19 +961,18 @@ class PerformanceTab(tb.Frame):
         account_id = self._get_account_filter()
         rows, prev_total = get_analysis_monthly(year_from, year_to, account_id)
 
-        self.ax.clear()
+        # Параметры для перерисовки при смене вида
+        self._year_from = year_from
+        self._year_to = year_to
+        self._has_data = bool(rows)
 
         if not rows:
             self.xirr_value_label.configure(text="—", bootstyle="secondary")
             self.twr_value_label.configure(text="—", bootstyle="secondary")
-            self.ax.set_title("Нет данных за выбранный период", fontsize=12)
-            self.ax.set_xticks([])
-            self.ax.set_yticks([])
-            self.figure.tight_layout()
-            self.canvas.draw()
+            self._draw_chart()
             return
 
-        # ── TWR: накопительный ряд и итог ──
+        # ── TWR: ряд и итог ──
         twr_points, twr_total = twr_series(rows, prev_total)
 
         # ── XIRR: денежные потоки ──
@@ -986,27 +995,77 @@ class PerformanceTab(tb.Frame):
             bootstyle="success" if twr_total >= 0 else "danger",
         )
 
-        # ── График накопительного TWR ──
+        # Сохраняем данные для перерисовки при смене вида
+        self._twr_points = twr_points
+        self._twr_total = twr_total
+        self._draw_chart()
+
+    # ── отрисовка графика по текущему виду ──────────────────────
+
+    def _draw_chart(self):
+        self.ax.clear()
+
+        # Нет данных
+        if not getattr(self, '_has_data', False):
+            self.ax.set_title("Нет данных за выбранный период", fontsize=12)
+            self.ax.set_xticks([])
+            self.ax.set_yticks([])
+            self.figure.tight_layout()
+            self.canvas.draw()
+            return
+
+        twr_points = self._twr_points
+        twr_total = self._twr_total
+        year_from = self._year_from
+        year_to = self._year_to
+
+        # Разбор точек ряда
         months = []
         year_labels = []
-        values = []
-        for ym, pct in twr_points:
+        for ym, _monthly_pct, _cum_pct in twr_points:
             mn = int(ym.split('-')[1])
-            yr = ym[:4]
             months.append(MONTHS_RU[mn - 1])
-            year_labels.append(yr)
-            values.append(pct)
+            year_labels.append(ym[:4])
 
         x = list(range(len(months)))
-        line_color = 'green' if twr_total >= 0 else 'red'
-        self.ax.plot(x, values, color=line_color, linewidth=2, marker='o', markersize=4)
-        self.ax.fill_between(x, values, 0, color=line_color, alpha=0.12)
-        self.ax.axhline(y=0, color='black', linewidth=0.5)
+        view = self.view_combo.get()
 
-        if year_from == year_to:
-            chart_title = f"Изменение доходности портфеля (TWR, %) — {year_from} г."
+        if view == "По месяцам":
+            # Помесячный TWR: прибыль — зелёные столбцы вверх,
+            # убыток — красные столбцы вниз
+            monthly_vals = [p[1] for p in twr_points]
+            pos = [v if v >= 0 else 0.0 for v in monthly_vals]
+            neg = [v if v < 0 else 0.0 for v in monthly_vals]
+            self.ax.bar(x, pos, color='green', width=0.65, edgecolor='none')
+            self.ax.bar(x, neg, color='red', width=0.65, edgecolor='none')
+            self.ax.axhline(y=0, color='black', linewidth=0.6)
+
+            # Подписи значений над/под каждым баром
+            for i, v in enumerate(monthly_vals):
+                if v >= 0:
+                    self.ax.text(i, v, f"{v:+.2f}%", ha='center', va='bottom',
+                                 color='green', fontsize=7)
+                else:
+                    self.ax.text(i, v, f"{v:+.2f}%", ha='center', va='top',
+                                 color='red', fontsize=7)
+
+            if year_from == year_to:
+                chart_title = f"Помесячная доходность портфеля (TWR, %) — {year_from} г."
+            else:
+                chart_title = f"Помесячная доходность портфеля (TWR, %) — {year_from}–{year_to} г."
         else:
-            chart_title = f"Изменение доходности портфеля (TWR, %) — {year_from}–{year_to} г."
+            # График накопительного TWR
+            values = [p[2] for p in twr_points]
+            line_color = 'green' if twr_total >= 0 else 'red'
+            self.ax.plot(x, values, color=line_color, linewidth=2, marker='o', markersize=4)
+            self.ax.fill_between(x, values, 0, color=line_color, alpha=0.12)
+            self.ax.axhline(y=0, color='black', linewidth=0.5)
+
+            if year_from == year_to:
+                chart_title = f"Изменение доходности портфеля (TWR, %) — {year_from} г."
+            else:
+                chart_title = f"Изменение доходности портфеля (TWR, %) — {year_from}–{year_to} г."
+
         self.ax.set_title(chart_title, fontsize=12)
 
         # Разделители годов

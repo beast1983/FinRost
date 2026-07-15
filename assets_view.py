@@ -608,11 +608,12 @@ class AssetsView(tb.Frame):
         # Получаем курсы для расчёта стоимости в рублях
         rates = get_exchange_rates()
         current_price = asset["current_price"] or avg_price
+        ls = asset["lot_size"] if asset["lot_size"] and asset["lot_size"] > 0 else 1
         if asset_type == "облигация":
             fv = asset["face_value"] or 1000
             total_rub = quantity * current_price * fv / 100
         else:
-            total_rub = quantity * current_price
+            total_rub = quantity * ls * current_price
         if currency == "USD":
             total_rub *= rates.get("USD", 90.0)
         elif currency == "EUR":
@@ -1228,6 +1229,12 @@ class AssetsView(tb.Frame):
                 messagebox.showerror("Ошибка", "Некорректный ввод чисел")
                 return
 
+            try:
+                lot_val = lot_var.get().strip()
+                lot_size = int(float(lot_val)) if lot_val else 1
+            except (ValueError, TypeError):
+                lot_size = 1
+
             acct_name = account_var.get()
             if not acct_name or acct_name == "Не указан":
                 messagebox.showerror("Ошибка", "Выберите счёт")
@@ -1245,7 +1252,7 @@ class AssetsView(tb.Frame):
                 # Существующий актив — докупка
                 aid = int(asset_id_var.get())
                 account_id = account_options.get(acct_name)
-                result, success, msg = buy_more_asset(aid, qty, price, buy_date, account_id=account_id)
+                result, success, msg = buy_more_asset(aid, qty, price, buy_date, account_id=account_id, lot_size=lot_size)
                 if success:
                     _persist_ticker_registry()
                     messagebox.showinfo("Успех",
@@ -1303,7 +1310,7 @@ class AssetsView(tb.Frame):
                         break
 
                 result, success, msg = add_asset(ticker, asset_type, qty, price, buy_date,
-                                                  account_id=account_id, name=name, currency_code=currency)
+                                                  account_id=account_id, name=name, currency_code=currency, lot_size=lot_size)
                 if success:
                     _persist_ticker_registry()
                     messagebox.showinfo("Успех", f"Актив {ticker} добавлен\n{msg}")

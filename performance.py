@@ -173,7 +173,9 @@ def twr_series(monthly_rows, start_value):
     start_value  : стоимость портфеля на начало первого месяца (BMV) или None.
 
     Возвращает кортеж:
-      (список [(ym, cumulative_pct), ...], итоговая_доля).
+      (список [(ym, monthly_pct, cumulative_pct), ...], итоговая_доля).
+    Где monthly_pct     — доходность месяца r_i в процентах;
+          cumulative_pct — накопительная доходность к концу месяца в процентах.
     Под-периодный доход считается в предположении, что чистый поток
     поступает в начале месяца:
         r_i = EMV / (BMV + CF) - 1,   CF = deposits - withdrawals
@@ -206,7 +208,7 @@ def twr_series(monthly_rows, start_value):
             r_i = 0.0
 
         cum_factor *= (1.0 + r_i)
-        series.append((r["ym"], (cum_factor - 1.0) * 100.0))
+        series.append((r["ym"], r_i * 100.0, (cum_factor - 1.0) * 100.0))
         bmv = emv  # конец месяца становится началом следующего
         pending_cf = 0.0
 
