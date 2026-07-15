@@ -1,6 +1,8 @@
 import tkinter as tk
 import ttkbootstrap as tb
 from tkinter import messagebox
+import threading
+import queue
 from database import (
     get_all_assets, add_asset, sell_asset, remove_asset, update_asset,
     update_asset_price, get_all_accounts, get_account, get_exchange_rates,
@@ -46,7 +48,12 @@ class AssetsView(tb.Frame):
         super().__init__(parent)
         self.controller = controller
         self.current_broker_id = None  # None = все брокеры
+        self._refresh_btn = None
+        self._refresh_cancel = threading.Event()
+        self._refresh_queue = None
+        self._refresh_in_progress = False
         self._create_ui()
+        self.bind('<Destroy>', lambda e: self._refresh_cancel.set(), add='+')
         self.refresh()
 
     def set_broker(self, broker_id):
@@ -112,7 +119,7 @@ class AssetsView(tb.Frame):
         tb.Button(btn_frame, text="Продать", command=self._sell_asset, bootstyle="warning").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Купон/Дивиденд", command=self._credit, bootstyle="primary").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Изменить", command=self._edit_asset, bootstyle="info").pack(side=tk.LEFT, padx=2)
-        tb.Button(btn_frame, text="Обновить цены", command=self._refresh_prices, bootstyle="info").pack(side=tk.LEFT, padx=2)
+        self._refresh_btn = tb.Button(btn_frame, text="Обновить цены", command=self._refresh_prices, bootstyle="info").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Сохранить срез", command=self._save_snapshot, bootstyle="primary").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Перечитать", command=self.refresh, bootstyle="info").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Удалить", command=self._remove_asset, bootstyle="danger").pack(side=tk.LEFT, padx=2)
@@ -152,36 +159,101 @@ class AssetsView(tb.Frame):
         dialog.geometry(f"+{x}+{y}")
 
     def _refresh_prices(self):
-        """Обновление текущих цен через API Московской биржи."""
+        """Асинхронное обновление цен в фоновом потоке."""
+        if self._refresh_in_progress:
+            return
+
         assets = get_all_assets(self.current_broker_id)
-        
         if not assets:
             messagebox.showinfo("Информация", "Нет активов для обновления цен")
             return
-        
-        total = len(assets)
-        success = 0
-        failed = 0
-        not_found = 0
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Проверяем интернет
-        if not is_connected():
-            messagebox.showwarning("Нет интернета", 
-                "Подключение к интернету отсутствует. Будут показаны последние сохранённые цены.")
-            self.status_var.set("Нет интернета. Используются сохранённые цены.")
-            self.refresh()
+
+        self._refresh_in_progress = True
+        self._refresh_queue = queue.Queue()
+        self._refresh_cancel.clear()
+
+        if self._refresh_btn:
+            self._refresh_btn.config(state=tb.DISABLED)
+        self.status_var.set("Подготовка обновления...")
+
+        threading.Thread(
+            target=self._refresh_worker,
+            args=(assets,),
+            daemon=True,
+        ).start()
+
+        self._poll_refresh_queue()
+
+    def _poll_refresh_queue(self):
+        """Опрос очереди обновлений в главном потоке (tkinter-safe)."""
+        if not self.winfo_exists():
+            self._refresh_in_progress = False
             return
-        
-        # Обновляем каждый тикер
+
+        msgs = []
+        while True:
+            try:
+                msg = self._refresh_queue.get_nowait()
+                msgs.append(msg)
+            except queue.Empty:
+                break
+
+        for msg in msgs:
+            kind = msg[0] if isinstance(msg, (list, tuple)) and len(msg) >= 1 else None
+
+            if kind == "status":
+                self.status_var.set(msg[1])
+            elif kind == "nointernet":
+                self.status_var.set("Нет интернета. Используются сохранённые цены.")
+                self.refresh()
+                self._refresh_in_progress = False
+                if self._refresh_btn:
+                    self._refresh_btn.config(state=tb.NORMAL)
+                messagebox.showwarning("Нет интернета",
+                    "Подключение к интернету отсутствует. Будут показаны последние сохранённые цены.")
+                return
+            elif kind == "done":
+                success, not_found, failed = msg[1], msg[2], msg[3]
+                self.refresh()
+                self._refresh_in_progress = False
+                if self._refresh_btn:
+                    self._refresh_btn.config(state=tb.NORMAL)
+                result_msg = f"Успешно: {success}"
+                if not_found > 0:
+                    result_msg += f", не найдено: {not_found}"
+                if failed > 0:
+                    result_msg += f", ошибок: {failed}"
+                messagebox.showinfo("Результат", result_msg)
+                return
+
+        self.after(100, self._poll_refresh_queue)
+
+    def _refresh_worker(self, assets):
+        """Фоновый поток: fetch + update_db (без tkinter-вызовов)."""
+        total = len(assets)
+        success = failed = not_found = 0
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        try:
+            if not is_connected():
+                self._refresh_queue.put(("nointernet",))
+                return
+        except Exception:
+            self._refresh_queue.put(("nointernet",))
+            return
+
         for i, asset in enumerate(assets, 1):
+            if self._refresh_cancel.is_set():
+                self._refresh_queue.put(("cancel",))
+                return
+
             asset_id = asset["id"]
             ticker = asset["ticker"]
             asset_type = asset["asset_type"]
-            
+
             try:
                 price, error = fetch_price(ticker, asset_type)
-                
+
                 if price is not None:
                     static_data = None
                     if asset_type == "облигация":
@@ -197,34 +269,24 @@ class AssetsView(tb.Frame):
                         ll = static_data.get("list_level")
                         cp = static_data.get("coupon_percent")
                         update_asset_price(asset_id, price, now,
-                                         face_value=fv, lot_size=ls, lot_value=lv, list_level=ll, coupon_percent=cp)
+                                         face_value=fv, lot_size=ls, lot_value=lv,
+                                         list_level=ll, coupon_percent=cp)
                     else:
                         update_asset_price(asset_id, price, now)
                     success += 1
-                    self.status_var.set(f"[{i}/{total}] {ticker}: {price:.2f} ✓")
+                    _msg = f"{ticker}: {price:.2f} ✓"
                 else:
                     not_found += 1
-                    self.status_var.set(f"[{i}/{total}] {ticker}: не найдено на бирже")
-                    
+                    _msg = f"{ticker}: не найдено на бирже"
+
             except Exception as e:
                 failed += 1
-                self.status_var.set(f"[{i}/{total}] {ticker}: ошибка - {str(e)}")
-            
-            # Обновляем UI для отображения прогресса
-            self.refresh()
-            self.update_idletasks()
-        
-        # Финальное обновление
-        self.refresh()
-        
-        result_msg = f"Успешно: {success}"
-        if not_found > 0:
-            result_msg += f", не найдено: {not_found}"
-        if failed > 0:
-            result_msg += f", ошибок: {failed}"
-        
-        messagebox.showinfo("Результат", result_msg)
-        self.status_var.set(result_msg)
+                _msg = f"{ticker}: ошибка - {str(e)}"
+
+            self._refresh_queue.put(("status",
+                f"Обновление... {i} из {total} — {_msg}"))
+
+        self._refresh_queue.put(("done", success, not_found, failed))
 
     def _is_price_stale(self, last_update_str):
         """
