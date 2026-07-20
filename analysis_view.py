@@ -890,9 +890,9 @@ class PerformanceTab(tb.Frame):
         tb.Label(filter_frame, text="Вид:").pack(side=tk.LEFT, padx=(0, 4))
         self.view_combo = tb.Combobox(
             filter_frame, state="readonly", width=12, justify=tk.CENTER,
-            values=["График", "По месяцам"],
+            values=["Накопительная", "По месяцам"],
         )
-        self.view_combo.set("График")
+        self.view_combo.set("Накопительная")
         self.view_combo.pack(side=tk.LEFT, padx=(0, 15))
         self.view_combo.bind('<<ComboboxSelected>>', lambda e: self._draw_chart())
 

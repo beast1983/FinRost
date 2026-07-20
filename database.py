@@ -1167,13 +1167,41 @@ def _fx_rate_for_currency(currency_id, rates):
     return 1.0
 
 
-def save_snapshot():
-    """Сохранить срез портфеля за текущую дату для всех активных счетов."""
+def get_latest_snapshot_month():
+    """Вернуть последний год-месяц ('YYYY-MM') среза или None, если срезов нет."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT MAX(strftime('%Y-%m', date)) as ym FROM snapshots")
+    row = cursor.fetchone()
+    conn.close()
+    return row["ym"] if row and row["ym"] else None
+
+
+def save_snapshot(target_ym=None):
+    """Сохранить срез портфеля за текущую дату для всех активных счетов.
+
+    Args:
+        target_ym: str "YYYY-MM" — целевой месяц для среза (бэкап за
+                   пропущенный месяц). Дата среза = последний день
+                   target_ym, транзакции суммируются за target_ym.
+                   Если None — используется текущий месяц.
+    """
     conn = get_connection()
     cursor = conn.cursor()
     today = datetime.now().strftime("%Y-%m-%d")
-    year_month = today[:7]
+    year_month = target_ym if target_ym else today[:7]
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if target_ym:
+        try:
+            yr, mo = int(target_ym[:4]), int(target_ym[5:7])
+        except ValueError:
+            yr, mo = datetime.now().year, datetime.now().month
+        last_day = calendar.monthrange(yr, mo)[1]
+        snapshot_date = f"{target_ym}-{last_day:02d}"
+    else:
+        snapshot_date = today
+
     rates = _get_rates_from_db(cursor)
 
     accounts_count = 0
@@ -1225,7 +1253,7 @@ def save_snapshot():
 
         portfolio_total = round_price(balance_rub + assets_value_rub)
 
-        _ym = today[:7]
+        _ym = year_month
         def sum_by_type(tx_type):
             cursor.execute(
                 "SELECT COALESCE(SUM(amount), 0) as s FROM transactions "
@@ -1249,7 +1277,7 @@ def save_snapshot():
                 (date, account_id, balance_rub, assets_value_rub, portfolio_total_rub,
                  deposits, withdrawals, dividends, coupons, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (today, aid, round_price(balance_rub), round_price(assets_value_rub),
+        """, (snapshot_date, aid, round_price(balance_rub), round_price(assets_value_rub),
               portfolio_total, deposits, withdrawals, dividends, coupons, created_at))
         snapshot_id = cursor.lastrowid
 

@@ -41,6 +41,26 @@ def _bind_entry_context_menu(widget):
     widget.bind("<Button-3>", show_menu)
 
 
+def _bind_comma_to_dot(entry):
+    """Заменить запятую на точку при вводе и при вставке из буфера в числовых полях."""
+    def on_comma(_event):
+        entry.insert(tk.INSERT, '.')
+        return 'break'
+    entry.bind('<Key-comma>', on_comma)
+    _orig_insert = entry.insert
+    def _insert_with_dot(*args, **kwargs):
+        return _orig_insert(*args, **kwargs)
+    def _fix_on_insert(_event=None):
+        try:
+            val = entry.get()
+            if ',' in val:
+                entry.delete(0, tk.END)
+                entry.insert(0, val.replace(',', '.'))
+        except Exception:
+            pass
+    entry.bind('<KeyRelease>', _fix_on_insert)
+
+
 class AssetsView(tb.Frame):
     """Вкладка управления активами."""
 
@@ -621,6 +641,7 @@ class AssetsView(tb.Frame):
         result = save_snapshot_full(self, self.status_var)
         if result is None:
             return  # отменено
+        self.refresh()
 
     def _sell_asset(self):
         """Открытие формы продажи актива."""
@@ -690,6 +711,7 @@ class AssetsView(tb.Frame):
         sell_price_entry = tb.Entry(dialog, textvariable=sell_price_var)
         sell_price_entry.pack(pady=5)
         _bind_entry_context_menu(sell_price_entry)
+        _bind_comma_to_dot(sell_price_entry)
 
         # Дата продажи
         tb.Label(dialog, text="Дата продажи:").pack()
@@ -716,7 +738,7 @@ class AssetsView(tb.Frame):
 
         def on_sell():
             try:
-                sell_price = float(sell_price_var.get())
+                sell_price = float(sell_price_var.get().replace(',', '.'))
                 sell_date = sell_date_entry.get_date().strftime("%Y-%m-%d")
 
                 qty_text = sell_qty_var.get().strip()
@@ -806,6 +828,7 @@ class AssetsView(tb.Frame):
         amount_entry = tb.Entry(dialog, textvariable=amount_var)
         amount_entry.pack(pady=5)
         _bind_entry_context_menu(amount_entry)
+        _bind_comma_to_dot(amount_entry)
 
         # Дата
         tb.Label(dialog, text="Дата").pack()
@@ -821,7 +844,7 @@ class AssetsView(tb.Frame):
 
         def on_save():
             try:
-                amount = float(amount_var.get())
+                amount = float(amount_var.get().replace(',', '.'))
                 if amount <= 0:
                     messagebox.showerror("Ошибка", "Сумма должна быть больше 0")
                     return
@@ -965,6 +988,7 @@ class AssetsView(tb.Frame):
 
         for w in [qty_entry, price_entry, lot_entry]:
             _bind_entry_context_menu(w)
+        _bind_comma_to_dot(price_entry)
 
         # ---- Helpers ----
         def _set_fields_editable(edit: bool):
@@ -1285,7 +1309,7 @@ class AssetsView(tb.Frame):
         def on_buy():
             try:
                 qty = float(qty_var.get())
-                price = float(price_var.get())
+                price = float(price_var.get().replace(',', '.'))
                 buy_date = date_entry.get_date().strftime("%Y-%m-%d")
             except ValueError:
                 messagebox.showerror("Ошибка", "Некорректный ввод чисел")
