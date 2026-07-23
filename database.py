@@ -1456,8 +1456,10 @@ def get_prev_month_asset_values(account_id=None):
         account_id: фильтр по счёту; None — по всем счетам.
 
     Returns:
-        dict {(account_id, ticker): value_rub} — сумма value_rub по паре
-        «счёт + тикер» за последний прошедший месяц. Пустой словарь, если
+        dict {(account_id, ticker): (value_rub, quantity)} — сумма value_rub и
+        сумма quantity по паре «счёт + тикер» за последний прошедший месяц.
+        Количество нужно для сравнения цены за единицу (а не общей стоимости),
+        чтобы изменение числа бумаг не искажало результат. Пустой словарь, если
         прошлого среза нет.
     """
     conn = get_connection()
@@ -1483,7 +1485,8 @@ def get_prev_month_asset_values(account_id=None):
         return {}
 
     cursor.execute("""
-        SELECT s.account_id AS aid, sa.ticker AS ticker, SUM(sa.value_rub) AS v
+        SELECT s.account_id AS aid, sa.ticker AS ticker,
+               SUM(sa.value_rub) AS v, SUM(sa.quantity) AS q
         FROM snapshot_assets sa
         JOIN snapshots s ON sa.snapshot_id = s.id
         WHERE strftime('%Y-%m', s.date) = ?
@@ -1491,7 +1494,7 @@ def get_prev_month_asset_values(account_id=None):
         GROUP BY s.account_id, sa.ticker
     """, (ym, account_id, account_id))
 
-    result = {(r["aid"], r["ticker"]): r["v"] for r in cursor.fetchall()}
+    result = {(r["aid"], r["ticker"]): (r["v"], r["q"]) for r in cursor.fetchall()}
     conn.close()
     return result
 

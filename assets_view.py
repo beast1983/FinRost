@@ -451,15 +451,22 @@ class AssetsView(tb.Frame):
                 cp = asset["coupon_percent"]
                 coupon_display = f"{cp:.2f}" if cp is not None else "—"
 
-                # Сравнение с прошлым месяцем (только акции и облигации)
+                # Сравнение с прошлым месяцем по цене за единицу
+                # (стоимость / количество), чтобы изменение числа бумаг
+                # не искажало результат: только акции и облигации.
                 cmp_tag = ()
                 if asset["asset_type"] in ("акция", "облигация"):
                     prev = prev_values.get((asset["broker_id"], asset["ticker"]))
                     if prev is not None:
-                        if total_rub - prev > 1.0:
-                            cmp_tag = ('cmp_up',)
-                        elif prev - total_rub > 1.0:
-                            cmp_tag = ('cmp_down',)
+                        prev_value, prev_qty = prev
+                        curr_qty = asset["quantity"]
+                        if prev_qty and prev_qty > 0 and curr_qty and curr_qty > 0:
+                            curr_per_unit = total_rub / curr_qty
+                            prev_per_unit = prev_value / prev_qty
+                            if curr_per_unit - prev_per_unit > 1.0:
+                                cmp_tag = ('cmp_up',)
+                            elif prev_per_unit - curr_per_unit > 1.0:
+                                cmp_tag = ('cmp_down',)
 
                 self.tree.insert('', tk.END, values=(
                     name,
