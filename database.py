@@ -1447,58 +1447,6 @@ def get_snapshot_assets(snapshot_id):
     conn.close()
     return rows
 
-
-def get_prev_month_asset_values(account_id=None):
-    """Вернуть прошлые стоимости активов для самого свежего завершённого
-    месячного среза (строго раньше текущего месяца).
-
-    Args:
-        account_id: фильтр по счёту; None — по всем счетам.
-
-    Returns:
-        dict {(account_id, ticker): (value_rub, quantity)} — сумма value_rub и
-        сумма quantity по паре «счёт + тикер» за последний прошедший месяц.
-        Количество нужно для сравнения цены за единицу (а не общей стоимости),
-        чтобы изменение числа бумаг не искажало результат. Пустой словарь, если
-        прошлого среза нет.
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    if account_id:
-        cursor.execute("""
-            SELECT MAX(strftime('%Y-%m', date)) AS ym
-            FROM snapshots
-            WHERE account_id = ?
-              AND strftime('%Y-%m', date) < strftime('%Y-%m', 'now')
-        """, (account_id,))
-    else:
-        cursor.execute("""
-            SELECT MAX(strftime('%Y-%m', date)) AS ym
-            FROM snapshots
-            WHERE strftime('%Y-%m', date) < strftime('%Y-%m', 'now')
-        """)
-    row = cursor.fetchone()
-    ym = row["ym"] if row and row["ym"] else None
-    if not ym:
-        conn.close()
-        return {}
-
-    cursor.execute("""
-        SELECT s.account_id AS aid, sa.ticker AS ticker,
-               SUM(sa.value_rub) AS v, SUM(sa.quantity) AS q
-        FROM snapshot_assets sa
-        JOIN snapshots s ON sa.snapshot_id = s.id
-        WHERE strftime('%Y-%m', s.date) = ?
-          AND (? IS NULL OR s.account_id = ?)
-        GROUP BY s.account_id, sa.ticker
-    """, (ym, account_id, account_id))
-
-    result = {(r["aid"], r["ticker"]): (r["v"], r["q"]) for r in cursor.fetchall()}
-    conn.close()
-    return result
-
-
 # ================================================================
 #  Импорт исторических срезов
 # ================================================================

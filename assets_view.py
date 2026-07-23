@@ -10,7 +10,6 @@ from database import (
     credit_coupon_or_dividend, get_currencies, get_currency_id,
     get_ticker_name, get_ticker_info, search_ticker_names,
     update_ticker_name, update_ticker_from_moex,
-    get_prev_month_asset_values
 )
 from datetime import datetime
 from api_client import (
@@ -125,9 +124,9 @@ class AssetsView(tb.Frame):
 
         self.tree.configure(style='Assets.Treeview')
 
-        # Подсветка сравнения с прошлым месяцем
-        self.tree.tag_configure('cmp_up', background='#dff0d8')   # светло-зелёный
-        self.tree.tag_configure('cmp_down', background='#f2dede')  # светло-красный
+        # Подсветка сравнения текущей цены со средней ценой покупки
+        self.tree.tag_configure('cmp_up', background='#dff0d8')   # выросла — в плюсе
+        self.tree.tag_configure('cmp_down', background='#f2dede')  # упала — в убытке
 
         # Скроллбар
         scrollbar = tb.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -149,11 +148,11 @@ class AssetsView(tb.Frame):
         tb.Button(btn_frame, text="Перечитать", command=self.refresh, bootstyle="info").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Удалить", command=self._remove_asset, bootstyle="danger").pack(side=tk.LEFT, padx=2)
 
-        # Переключатель сравнения с прошлым месяцем
-        self.compare_prev_var = tk.BooleanVar(value=True)
+        # Переключатель сравнения текущей цены со средней ценой покупки
+        self.compare_avg_var = tk.BooleanVar(value=True)
         tb.Checkbutton(
-            btn_frame, text="Сравнить с прошлым месяцем",
-            variable=self.compare_prev_var, command=self.refresh,
+            btn_frame, text="Сравнение со средней",
+            variable=self.compare_avg_var, command=self.refresh,
         ).pack(side=tk.LEFT, padx=8)
 
         # Статус бар
@@ -357,10 +356,6 @@ class AssetsView(tb.Frame):
         # Получаем курсы валют
         rates = get_exchange_rates()
 
-        # Прошлые стоимости активов для сравнения (по паре счёт+тикер)
-        prev_values = (get_prev_month_asset_values(self.current_broker_id)
-                       if self.compare_prev_var.get() else {})
-
         # Группировка по брокерам
         grouped = {}
         for asset in assets:
@@ -451,22 +446,18 @@ class AssetsView(tb.Frame):
                 cp = asset["coupon_percent"]
                 coupon_display = f"{cp:.2f}" if cp is not None else "—"
 
-                # Сравнение с прошлым месяцем по цене за единицу
-                # (стоимость / количество), чтобы изменение числа бумаг
-                # не искажало результат: только акции и облигации.
+                # Сравнение текущей цены со средней ценой покупки (доходность после покупки).
+                # Цены в одном масштабе (валюта бумаги; облигации — % от номинала),
+                # поэтому сравниваем напрямую. Зелёный — выросла, красный — упала.
                 cmp_tag = ()
-                if asset["asset_type"] in ("акция", "облигация"):
-                    prev = prev_values.get((asset["broker_id"], asset["ticker"]))
-                    if prev is not None:
-                        prev_value, prev_qty = prev
-                        curr_qty = asset["quantity"]
-                        if prev_qty and prev_qty > 0 and curr_qty and curr_qty > 0:
-                            curr_per_unit = total_rub / curr_qty
-                            prev_per_unit = prev_value / prev_qty
-                            if curr_per_unit - prev_per_unit > 1.0:
-                                cmp_tag = ('cmp_up',)
-                            elif prev_per_unit - curr_per_unit > 1.0:
-                                cmp_tag = ('cmp_down',)
+                if self.compare_avg_var.get():
+                    avg = asset["avg_price"] or 0
+                    curr = asset["current_price"] or 0
+                    if avg > 0 and curr > 0:
+                        if curr - avg > 1.0:
+                            cmp_tag = ('cmp_up',)
+                        elif avg - curr > 1.0:
+                            cmp_tag = ('cmp_down',)
 
                 self.tree.insert('', tk.END, values=(
                     name,
