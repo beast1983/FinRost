@@ -332,6 +332,111 @@ def rename_ticker(old_ticker, new_ticker, name):
     conn.close()
 
 
+def convert_placeholder_tickers():
+    """Сопоставить технические тикеры АКТИВ_* с настоящими тикерами из реестра.
+
+    После импорта исторических срезов из CSV строки без тикера получают условное
+    обозначение (АКТИВ_1, АКТИВ_2 …). Счётчик обнуляется при каждом импорте,
+    поэтому один и тот же АКТИВ_N в срезах разных лет может соответствовать
+    РАЗНЫМ реальным активам. Поэтому сопоставление выполняется ПОСТРОЧНО:
+    каждая строка таблиц берёт собственное name и ищет тикер в реестре.
+
+    При однозначном совпадении имени обновляется только эта строка
+    (через rowid для snapshot_assets и через id для assets).
+
+    Таблицы buys и transactions не затрагиваются: в них нет колонки name и
+    технические тикеры туда при импорте не попадают.
+
+    Returns:
+        dict с ключами:
+            converted: list[(old_ticker, new_ticker, name)] — успешные замены
+                       (уникальные тройки, без дублей по строкам)
+            ambiguous: list[(old_ticker, name, [tickers...])] — несколько кандидатов
+            not_found: list[(old_ticker, name)] — нет совпадения по имени
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        # 1. Реестр тикеров: нормализованное имя -> [тикеры]
+        cursor.execute("SELECT ticker, name FROM ticker_names")
+        name_map = {}
+        for row in cursor.fetchall():
+            name = (row["name"] or "").strip()
+            if name:
+                norm = " ".join(name.casefold().split())
+                name_map.setdefault(norm, []).append(row["ticker"])
+
+        converted = []
+        ambiguous = []
+        not_found = []
+        seen_conv = set()    # для дедупликации отчёта
+        seen_amb = set()
+        seen_nf = set()
+
+        # 2. snapshot_assets — построчно через rowid
+        cursor.execute(
+            "SELECT rowid, ticker, name FROM snapshot_assets "
+            "WHERE ticker LIKE 'АКТИВ\\_%' ESCAPE '\\'"
+        )
+        for row in cursor.fetchall():
+            old_ticker = row["ticker"]
+            name = (row["name"] or "").strip()
+            if not name:
+                key = (old_ticker, "")
+                if key not in seen_nf:
+                    seen_nf.add(key)
+                    not_found.append((old_ticker, ""))
+                continue
+            norm = " ".join(name.casefold().split())
+            candidates = name_map.get(norm)
+            if not candidates:
+                key = (old_ticker, name)
+                if key not in seen_nf:
+                    seen_nf.add(key)
+                    not_found.append((old_ticker, name))
+            elif len(candidates) == 1:
+                new_ticker = candidates[0]
+                cursor.execute(
+                    "UPDATE snapshot_assets SET ticker = ? WHERE rowid = ?",
+                    (new_ticker, row["rowid"])
+                )
+                key = (old_ticker, new_ticker, name)
+                if key not in seen_conv:
+                    seen_conv.add(key)
+                    converted.append((old_ticker, new_ticker, name))
+            else:
+                key = (old_ticker, name)
+                if key not in seen_amb:
+                    seen_amb.add(key)
+                    ambiguous.append((old_ticker, name, candidates))
+
+        # 3. assets — построчно через id (на случай ручного ввода)
+        cursor.execute(
+            "SELECT id, ticker, name FROM assets "
+            "WHERE ticker LIKE 'АКТИВ\\_%' ESCAPE '\\'"
+        )
+        for row in cursor.fetchall():
+            name = (row["name"] or "").strip()
+            if not name:
+                continue
+            norm = " ".join(name.casefold().split())
+            candidates = name_map.get(norm)
+            if len(candidates) == 1:
+                cursor.execute(
+                    "UPDATE assets SET ticker = ? WHERE id = ?",
+                    (candidates[0], row["id"])
+                )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return {"converted": converted, "ambiguous": ambiguous, "not_found": not_found}
+
+
 def get_ticker_name(ticker):
     """Получить имя тикера из реестра."""
     conn = get_connection()
@@ -1341,6 +1446,54 @@ def get_snapshot_assets(snapshot_id):
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+
+def get_prev_month_asset_values(account_id=None):
+    """Вернуть прошлые стоимости активов для самого свежего завершённого
+    месячного среза (строго раньше текущего месяца).
+
+    Args:
+        account_id: фильтр по счёту; None — по всем счетам.
+
+    Returns:
+        dict {(account_id, ticker): value_rub} — сумма value_rub по паре
+        «счёт + тикер» за последний прошедший месяц. Пустой словарь, если
+        прошлого среза нет.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if account_id:
+        cursor.execute("""
+            SELECT MAX(strftime('%Y-%m', date)) AS ym
+            FROM snapshots
+            WHERE account_id = ?
+              AND strftime('%Y-%m', date) < strftime('%Y-%m', 'now')
+        """, (account_id,))
+    else:
+        cursor.execute("""
+            SELECT MAX(strftime('%Y-%m', date)) AS ym
+            FROM snapshots
+            WHERE strftime('%Y-%m', date) < strftime('%Y-%m', 'now')
+        """)
+    row = cursor.fetchone()
+    ym = row["ym"] if row and row["ym"] else None
+    if not ym:
+        conn.close()
+        return {}
+
+    cursor.execute("""
+        SELECT s.account_id AS aid, sa.ticker AS ticker, SUM(sa.value_rub) AS v
+        FROM snapshot_assets sa
+        JOIN snapshots s ON sa.snapshot_id = s.id
+        WHERE strftime('%Y-%m', s.date) = ?
+          AND (? IS NULL OR s.account_id = ?)
+        GROUP BY s.account_id, sa.ticker
+    """, (ym, account_id, account_id))
+
+    result = {(r["aid"], r["ticker"]): r["v"] for r in cursor.fetchall()}
+    conn.close()
+    return result
 
 
 # ================================================================

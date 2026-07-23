@@ -9,7 +9,8 @@ from database import (
     get_asset, calculate_total_in_rubles, buy_more_asset,
     credit_coupon_or_dividend, get_currencies, get_currency_id,
     get_ticker_name, get_ticker_info, search_ticker_names,
-    update_ticker_name, update_ticker_from_moex
+    update_ticker_name, update_ticker_from_moex,
+    get_prev_month_asset_values
 )
 from datetime import datetime
 from api_client import (
@@ -17,7 +18,7 @@ from api_client import (
     fetch_ticker_static
 )
 from calendar_utils import create_date_entry
-from table_utils import apply_zebra
+from table_utils import apply_zebra, reveal_row_colors
 
 
 def _bind_entry_context_menu(widget):
@@ -124,6 +125,10 @@ class AssetsView(tb.Frame):
 
         self.tree.configure(style='Assets.Treeview')
 
+        # Подсветка сравнения с прошлым месяцем
+        self.tree.tag_configure('cmp_up', background='#dff0d8')   # светло-зелёный
+        self.tree.tag_configure('cmp_down', background='#f2dede')  # светло-красный
+
         # Скроллбар
         scrollbar = tb.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scrollbar.set)
@@ -143,6 +148,13 @@ class AssetsView(tb.Frame):
         tb.Button(btn_frame, text="Сохранить срез", command=self._save_snapshot, bootstyle="primary").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Перечитать", command=self.refresh, bootstyle="info").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Удалить", command=self._remove_asset, bootstyle="danger").pack(side=tk.LEFT, padx=2)
+
+        # Переключатель сравнения с прошлым месяцем
+        self.compare_prev_var = tk.BooleanVar(value=True)
+        tb.Checkbutton(
+            btn_frame, text="Сравнить с прошлым месяцем",
+            variable=self.compare_prev_var, command=self.refresh,
+        ).pack(side=tk.LEFT, padx=8)
 
         # Статус бар
         self.status_var = tk.StringVar(value="Готово")
@@ -345,6 +357,10 @@ class AssetsView(tb.Frame):
         # Получаем курсы валют
         rates = get_exchange_rates()
 
+        # Прошлые стоимости активов для сравнения (по паре счёт+тикер)
+        prev_values = (get_prev_month_asset_values(self.current_broker_id)
+                       if self.compare_prev_var.get() else {})
+
         # Группировка по брокерам
         grouped = {}
         for asset in assets:
@@ -361,8 +377,17 @@ class AssetsView(tb.Frame):
         
         sorted_broker_ids = sorted(grouped.keys(), key=sort_key)
         
+        _TYPE_ORDER = {"etf": 0, "акция": 1, "облигация": 2}
+
         for broker_id in sorted_broker_ids:
             broker_assets = grouped[broker_id]
+            broker_assets = sorted(
+                broker_assets,
+                key=lambda a: (
+                    _TYPE_ORDER.get(a["asset_type"], 99),
+                    (a["name"] or a["ticker"] or "").lower()
+                )
+            )
             broker_name = self._get_account_name(broker_id)
             
             # Заголовок группы (счёт)
@@ -426,6 +451,16 @@ class AssetsView(tb.Frame):
                 cp = asset["coupon_percent"]
                 coupon_display = f"{cp:.2f}" if cp is not None else "—"
 
+                # Сравнение с прошлым месяцем (только акции и облигации)
+                cmp_tag = ()
+                if asset["asset_type"] in ("акция", "облигация"):
+                    prev = prev_values.get((asset["broker_id"], asset["ticker"]))
+                    if prev is not None:
+                        if total_rub - prev > 1.0:
+                            cmp_tag = ('cmp_up',)
+                        elif prev - total_rub > 1.0:
+                            cmp_tag = ('cmp_down',)
+
                 self.tree.insert('', tk.END, values=(
                     name,
                     asset["ticker"],
@@ -440,10 +475,11 @@ class AssetsView(tb.Frame):
                     asset["purchase_date"],
                     update_display,
                     currency
-                ), tags=(str(asset["id"]),))
+                ), tags=cmp_tag + (str(asset["id"]),))
 
         self.status_var.set(f"Всего активов: {len(assets)}")
         apply_zebra(self.tree)
+        reveal_row_colors(self.tree)
 
     def _edit_asset(self):
         """Открытие формы редактирования актива."""

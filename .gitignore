@@ -10,10 +10,8 @@ app_config.json
 # Архивы / резервные копии
 Archiv/*.zip
 
-# Бинарники (больше не используются)
-Rar.exe
-UnRAR.exe
-UnRar.exe
+# Лишние файлы
+opencode.json
 
 # PyInstaller
 *.spec

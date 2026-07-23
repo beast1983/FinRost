@@ -31,3 +31,22 @@ def apply_zebra(tree, odd_bg=ZEBRA_ODD_BG, even_bg=ZEBRA_EVEN_BG, skip_tags=SKIP
         row_tag = 'zebra_odd' if parity % 2 else 'zebra_even'
         tree.item(item, tags=existing + (row_tag,))
         parity += 1
+
+
+# Теги-строки, несущие собственный цвет фона (сравнение с прошлым месяцем и т.п.)
+COLOR_TAGS = ('cmp_up', 'cmp_down')
+
+
+def reveal_row_colors(tree, color_tags=COLOR_TAGS):
+    """Снять зебру со строк, у которых есть собственный цветной тег.
+
+    apply_zebra кладёт тег zebra_odd/zebra_even в конец списка тегов, а в Tk
+    последний тег выигрывает при конфликте background. Чтобы проявился фон
+    cmp_up/cmp_down, удаляем зебра-теги у цветных строк уже после apply_zebra
+    (parity к этому моменту уже посчитан для всех строк).
+    """
+    for item in tree.get_children():
+        tags = tuple(tree.item(item, 'tags'))
+        if any(t in color_tags for t in tags):
+            clean = tuple(t for t in tags if t not in ('zebra_odd', 'zebra_even'))
+            tree.item(item, tags=clean)

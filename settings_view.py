@@ -7,7 +7,7 @@ from database import (
     get_snapshot_years, get_transaction_years,
     import_asset_slices, import_incomes,
     get_all_ticker_names, import_ticker_names, add_ticker_name, update_ticker_name, delete_ticker_name, rename_ticker, get_ticker_name, get_ticker_info,
-    update_ticker_from_moex,
+    update_ticker_from_moex, convert_placeholder_tickers,
     get_db_path, backup_database,
 )
 from api_client import fetch_cbr_exchange_rates, fetch_ticker_static
@@ -145,80 +145,47 @@ class CurrenciesSettingsTab(tb.Frame):
 
     def _create_ui(self):
         """Создание интерфейса вкладки валют."""
-        # Рамка курса USD/RUB
-        usd_rate_frame = tb.LabelFrame(self, text="Курс USD/RUB", padx=10, pady=10)
-        usd_rate_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Рамка со всеми тремя курсами в одну строку
+        rates_frame = tb.LabelFrame(self, text="Курсы валют", padx=10, pady=10)
+        rates_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        row = 0
+        currencies_info = [
+            ("USD", self.usd_rub_rate_var, "₽ за 1 USD"),
+            ("EUR", self.eur_rub_rate_var, "₽ за 1 EUR"),
+            ("CNY", self.cny_rub_rate_var, "₽ за 1 CNY"),
+        ]
 
-        # Поле ввода курса
-        tb.Label(usd_rate_frame, text="Курс:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        rate_entry = tb.Entry(usd_rate_frame, textvariable=self.usd_rub_rate_var, width=15)
-        rate_entry.grid(row=row, column=1, padx=5, pady=5)
-        _bind_entry_context_menu(rate_entry)
-        tb.Label(usd_rate_frame, text="₽ за 1 USD").grid(row=row, column=2, padx=5, pady=5)
-        row += 1
+        for col, (label, var, suffix) in enumerate(currencies_info):
+            rates_frame.columnconfigure(col, weight=1)
+            col_frame = tb.LabelFrame(rates_frame, text=label, padx=8, pady=8)
+            col_frame.grid(row=0, column=col, padx=8, pady=5, sticky=tk.NSEW)
+
+            tb.Label(col_frame, text="Курс:").grid(row=0, column=0, sticky=tk.W, pady=3)
+            entry = tb.Entry(col_frame, textvariable=var, width=12)
+            entry.grid(row=0, column=1, padx=5, pady=3)
+            _bind_entry_context_menu(entry)
+            tb.Label(col_frame, text=suffix, foreground="gray").grid(
+                row=1, column=0, columnspan=2, sticky=tk.W, pady=2
+            )
 
         # Дата обновления и статус
-        tb.Label(usd_rate_frame, text="Дата обновления:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        date_status_frame = tb.Frame(usd_rate_frame)
-        date_status_frame.grid(row=row, column=1, columnspan=2, sticky=tk.W, padx=5, pady=5)
-        tb.Label(date_status_frame, textvariable=self.last_update_date_var).pack(side=tk.LEFT)
-        tb.Label(date_status_frame, textvariable=self._usd_status_var, foreground="gray").pack(side=tk.LEFT, padx=5)
-        row += 1
+        date_frame = tb.Frame(self)
+        date_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
+        tb.Label(date_frame, text="Дата обновления:").pack(side=tk.LEFT)
+        tb.Label(date_frame, textvariable=self.last_update_date_var).pack(side=tk.LEFT, padx=5)
+        tb.Label(date_frame, textvariable=self._usd_status_var, foreground="gray").pack(side=tk.LEFT)
 
-        # Кнопки USD
-        usd_btn_frame = tb.Frame(usd_rate_frame)
-        usd_btn_frame.grid(row=row, column=0, columnspan=3, pady=5)
-        tb.Button(usd_btn_frame, text="🔄 Обновить курс (USD)", command=self._refresh_usd_rate, bootstyle="info").pack(side=tk.LEFT, padx=5)
-        tb.Button(usd_btn_frame, text="Сохранить", command=self._save_usd_rate, bootstyle="success").pack(side=tk.LEFT, padx=5)
-
-        # Рамка курса EUR/RUB
-        eur_rate_frame = tb.LabelFrame(self, text="Курс EUR/RUB", padx=10, pady=10)
-        eur_rate_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        row = 0
-
-        # Поле ввода курса EUR
-        tb.Label(eur_rate_frame, text="Курс:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        eur_rate_entry = tb.Entry(eur_rate_frame, textvariable=self.eur_rub_rate_var, width=15)
-        eur_rate_entry.grid(row=row, column=1, padx=5, pady=5)
-        _bind_entry_context_menu(eur_rate_entry)
-        tb.Label(eur_rate_frame, text="₽ за 1 EUR").grid(row=row, column=2, padx=5, pady=5)
-        row += 1
-
-        # Дата обновления EUR (используем ту же дату)
-        tb.Label(eur_rate_frame, text="Дата обновления:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        tb.Label(eur_rate_frame, textvariable=self.last_update_date_var).grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
-        row += 1
-
-        # Кнопки EUR
-        eur_btn_frame = tb.Frame(eur_rate_frame)
-        eur_btn_frame.grid(row=row, column=0, columnspan=3, pady=5)
-        tb.Button(eur_btn_frame, text="🔄 Обновить курс (EUR)", command=self._refresh_eur_rate, bootstyle="info").pack(side=tk.LEFT, padx=5)
-        tb.Button(eur_btn_frame, text="Сохранить", command=self._save_eur_rate, bootstyle="success").pack(side=tk.LEFT, padx=5)
-
-        # Рамка курса CNY/RUB
-        cny_rate_frame = tb.LabelFrame(self, text="Курс CNY/RUB", padx=10, pady=10)
-        cny_rate_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        row = 0
-
-        tb.Label(cny_rate_frame, text="Курс:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        cny_rate_entry = tb.Entry(cny_rate_frame, textvariable=self.cny_rub_rate_var, width=15)
-        cny_rate_entry.grid(row=row, column=1, padx=5, pady=5)
-        _bind_entry_context_menu(cny_rate_entry)
-        tb.Label(cny_rate_frame, text="₽ за 1 CNY").grid(row=row, column=2, padx=5, pady=5)
-        row += 1
-
-        tb.Label(cny_rate_frame, text="Дата обновления:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        tb.Label(cny_rate_frame, textvariable=self.last_update_date_var).grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
-        row += 1
-
-        cny_btn_frame = tb.Frame(cny_rate_frame)
-        cny_btn_frame.grid(row=row, column=0, columnspan=3, pady=5)
-        tb.Button(cny_btn_frame, text="🔄 Обновить курс (CNY)", command=self._refresh_cny_rate, bootstyle="info").pack(side=tk.LEFT, padx=5)
-        tb.Button(cny_btn_frame, text="Сохранить", command=self._save_cny_rate, bootstyle="success").pack(side=tk.LEFT, padx=5)
+        # Общие кнопки
+        btn_frame = tb.Frame(self)
+        btn_frame.pack(pady=12)
+        tb.Button(
+            btn_frame, text="🔄 Обновить курсы",
+            command=self._refresh_all_rates, bootstyle="info"
+        ).pack(side=tk.LEFT, padx=10)
+        tb.Button(
+            btn_frame, text="Сохранить",
+            command=self._save_all_rates, bootstyle="success"
+        ).pack(side=tk.LEFT, padx=10)
 
     def _load_rates_from_db(self):
         try:
@@ -349,6 +316,94 @@ class CurrenciesSettingsTab(tb.Frame):
                                    "Проверьте подключение к интернету.\n\n"
                                    "Будет использован старый курс.")
 
+    def _refresh_all_rates(self):
+        """Обновление всех курсов через ЦБ РФ одним запросом."""
+        self._usd_status_var.set("Загрузка...")
+        self.update()
+
+        rates = fetch_cbr_exchange_rates()
+        if not rates:
+            self._usd_status_var.set("✗ Ошибка")
+            messagebox.showwarning(
+                "Не обновлено",
+                "Не удалось получить курсы с ЦБ РФ.\n"
+                "Проверьте подключение к интернету.\n\n"
+                "Будет использован старый курс."
+            )
+            return
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        updated = []
+
+        mapping = [
+            ("usd_rub_rate", "USD", self.usd_rub_rate_var),
+            ("eur_rub_rate", "EUR", self.eur_rub_rate_var),
+            ("cny_rub_rate", "CNY", self.cny_rub_rate_var),
+        ]
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            for key, currency, var in mapping:
+                if currency in rates:
+                    new_rate = round(rates[currency], 4)
+                    var.set(str(new_rate))
+                    cursor.execute("""
+                        INSERT INTO settings (setting_key, setting_value, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+                    """, (key, str(new_rate), today, str(new_rate), today))
+                    updated.append(f"{currency}: {new_rate:.4f} ₽")
+            conn.commit()
+            self.last_update_date_var.set(today)
+            self._usd_status_var.set("✓ Обновлено")
+            messagebox.showinfo("Успех", "Курсы обновлены с ЦБ РФ:\n" + "\n".join(updated))
+        except Exception as e:
+            conn.rollback()
+            self._usd_status_var.set("✗ Ошибка")
+            messagebox.showerror("Ошибка", f"Не удалось сохранить курсы: {e}")
+        finally:
+            conn.close()
+
+    def _save_all_rates(self):
+        """Сохранение всех курсов (ручной ввод)."""
+        mapping = [
+            ("usd_rub_rate", "USD", self.usd_rub_rate_var),
+            ("eur_rub_rate", "EUR", self.eur_rub_rate_var),
+            ("cny_rub_rate", "CNY", self.cny_rub_rate_var),
+        ]
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            saved = []
+            for key, currency, var in mapping:
+                try:
+                    rate = float(var.get())
+                    if rate <= 0:
+                        messagebox.showerror("Ошибка", f"Курс {currency} должен быть положительным числом")
+                        conn.close()
+                        return
+                except ValueError:
+                    messagebox.showerror("Ошибка", f"Введите корректный курс для {currency}")
+                    conn.close()
+                    return
+                cursor.execute("""
+                    INSERT INTO settings (setting_key, setting_value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+                """, (key, str(rate), today, str(rate), today))
+                saved.append(f"{currency}: {rate} ₽")
+            conn.commit()
+            self.last_update_date_var.set(today)
+            messagebox.showinfo("Сохранено", "Курсы сохранены:\n" + "\n".join(saved))
+        except Exception as e:
+            conn.rollback()
+            messagebox.showerror("Ошибка", f"Не удалось сохранить курсы: {e}")
+        finally:
+            conn.close()
+
     def _save_usd_rate(self):
         """Сохранение курса USD (ручной ввод)."""
         self._save_rate("usd_rub_rate", "USD")
@@ -470,6 +525,26 @@ class GeneralSettingsTab(tb.Frame):
         tb.Entry(income_frame, textvariable=self.income_file_var, width=30).grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
         tb.Button(income_frame, text="Обзор", command=self._browse_income_file).grid(row=row, column=2, padx=5, pady=5)
 
+        # ─── Сопоставление тикеров ───
+        match_frame = tb.LabelFrame(self, text="Сопоставление тикеров", padx=10, pady=10)
+        match_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(
+            match_frame,
+            text=(
+                "После импорта CSV строки без тикера получают техническое имя "
+                "(АКТИВ_1, АКТИВ_2 …).\n"
+                "Кнопка сопоставит их с реестром тикеров по названию. "
+                "Нужно только один раз после импорта."
+            ),
+            foreground="gray", justify=tk.LEFT
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
+
+        tb.Button(
+            match_frame, text="🔗 Сопоставить АКТИВ_* с реестром",
+            command=self._convert_placeholder_tickers, bootstyle="primary"
+        ).grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
+
         # ─── База данных ───
         db_frame = tb.LabelFrame(self, text="База данных", padx=10, pady=10)
         db_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -542,6 +617,69 @@ class GeneralSettingsTab(tb.Frame):
         path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv"), ("Все файлы", "*.*")])
         if path:
             self.asset_file_var.set(path)
+
+    def _convert_placeholder_tickers(self):
+        """Сопоставить технические тикеры АКТИВ_* с реестром по названию."""
+        # Предварительно посчитать, есть ли что обрабатывать
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS c FROM snapshot_assets WHERE ticker LIKE 'АКТИВ\\_%' ESCAPE '\\'"
+        )
+        sa_count = cursor.fetchone()["c"]
+        cursor.execute(
+            "SELECT COUNT(*) AS c FROM assets WHERE ticker LIKE 'АКТИВ\\_%' ESCAPE '\\'"
+        )
+        a_count = cursor.fetchone()["c"]
+        conn.close()
+
+        total = sa_count + a_count
+        if total == 0:
+            messagebox.showinfo(
+                "Сопоставление",
+                "Технических тикеров АКТИВ_* не найдено.\n"
+                "Нечего сопоставлять."
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Подтверждение",
+            f"Записей с тикером АКТИВ_*: {total}.\n\n"
+            "Сопоставить их с реестром тикеров по названию?\n"
+            "Рекомендуется сначала сделать резервную копию БД."
+        ):
+            return
+
+        result = convert_placeholder_tickers()
+        converted = result["converted"]
+        ambiguous = result["ambiguous"]
+        not_found = result["not_found"]
+
+        lines = [f"✓ Сопоставлено: {len(converted)}"]
+        for old, new, name in converted[:20]:
+            lines.append(f"   {old} → {new}   «{name}»")
+        if len(converted) > 20:
+            lines.append(f"   …и ещё {len(converted) - 20}")
+
+        if ambiguous:
+            lines.append("")
+            lines.append(f"⚠ Неоднозначно: {len(ambiguous)}")
+            for old, name, tickers in ambiguous[:10]:
+                lines.append(f"   {old}   «{name}»: {', '.join(tickers)}")
+            if len(ambiguous) > 10:
+                lines.append(f"   …и ещё {len(ambiguous) - 10}")
+
+        if not_found:
+            lines.append("")
+            lines.append(f"✗ Не найдено в реестре: {len(not_found)}")
+            for old, name in not_found[:10]:
+                label = name if name else "(без названия)"
+                lines.append(f"   {old}   «{label}»")
+            if len(not_found) > 10:
+                lines.append(f"   …и ещё {len(not_found) - 10}")
+
+        messagebox.showinfo("Отчёт о сопоставлении", "\n".join(lines))
+        self.settings_view.tickers_tab.refresh()
 
     def _import_asset_values(self):
         """Импорт исторических срезов стоимости активов из CSV."""
