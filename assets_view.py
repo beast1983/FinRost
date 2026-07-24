@@ -181,6 +181,19 @@ class AssetsView(tb.Frame):
             return asset["currency_code"] or "RUB"
         return "RUB"
 
+    _FUNC_TAGS = ('cmp_up', 'cmp_down', 'group_header', 'zebra_odd', 'zebra_even', 'colored')
+
+    def _extract_asset_id(self, item):
+        """Достать числовой ID актива из тэгов строки, пропуская служебные тэги."""
+        for t in item.get('tags') or ():
+            if t in self._FUNC_TAGS:
+                continue
+            try:
+                return int(t)
+            except (ValueError, TypeError):
+                continue
+        return None
+
     def _center_on_parent(self, dialog):
         """Центрировать диалог над родительским окном."""
         dialog.update_idletasks()
@@ -473,7 +486,7 @@ class AssetsView(tb.Frame):
                     asset["purchase_date"],
                     update_display,
                     currency
-                ), tags=cmp_tag + (str(asset["id"]),))
+                ), tags=(str(asset["id"]),) + cmp_tag)
 
         self.status_var.set(f"Всего активов: {len(assets)}")
         apply_zebra(self.tree)
@@ -488,11 +501,10 @@ class AssetsView(tb.Frame):
 
         item = self.tree.item(selected[0])
         values = item['values']
-        asset_id = item['tags'][0] if item['tags'] else None
+        asset_id = self._extract_asset_id(item)
         if not asset_id:
             messagebox.showerror("Ошибка", "Не удалось определить актив")
             return
-        asset_id = int(asset_id)
 
         asset = get_asset(asset_id)
         if not asset:
@@ -656,11 +668,10 @@ class AssetsView(tb.Frame):
             return
 
         item = self.tree.item(selected[0])
-        asset_id = item['tags'][0] if item['tags'] else None
+        asset_id = self._extract_asset_id(item)
         if not asset_id:
             messagebox.showerror("Ошибка", "Не удалось определить актив для удаления")
             return
-        asset_id = int(asset_id)
         asset = get_asset(asset_id)
         ticker = asset["ticker"] if asset else "Неизвестно"
 
@@ -686,11 +697,10 @@ class AssetsView(tb.Frame):
 
         item = self.tree.item(selected[0])
         values = item['values']
-        asset_id = item['tags'][0] if item['tags'] else None
+        asset_id = self._extract_asset_id(item)
         if not asset_id:
             messagebox.showerror("Ошибка", "Не удалось определить актив для продажи")
             return
-        asset_id = int(asset_id)
         asset = get_asset(asset_id)
         if not asset:
             messagebox.showerror("Ошибка", "Актив не найден")
@@ -810,11 +820,10 @@ class AssetsView(tb.Frame):
             return
 
         item = self.tree.item(selected[0])
-        asset_id = item['tags'][0] if item['tags'] else None
+        asset_id = self._extract_asset_id(item)
         if not asset_id:
             messagebox.showerror("Ошибка", "Не удалось определить актив")
             return
-        asset_id = int(asset_id)
         asset = get_asset(asset_id)
         if not asset:
             messagebox.showerror("Ошибка", "Актив не найден")
@@ -911,7 +920,7 @@ class AssetsView(tb.Frame):
     def _buy_asset(self):
         """Открытие формы покупки нового или докупки существующего актива."""
         selected = self.tree.selection()
-        account_var = tk.StringVar()
+        account_var = tk.StringVar(value="Не указан")
         asset_var = tk.StringVar()  # "Новый" или "ticker · name"
         asset_id_var = tk.StringVar()  # asset_id при выборе существующего актива
 
@@ -1318,22 +1327,25 @@ class AssetsView(tb.Frame):
 
         # Pre-select asset if a row was selected in the tree
         if selected:
-            item = self.tree.item(selected[0])
-            sel_asset_id = item['tags'][0] if item['tags'] else None
-            if sel_asset_id:
-                asset = get_asset(int(sel_asset_id))
-                if asset:
-                    asset = dict(asset)
-                    if asset["broker_id"]:
-                        for an in account_values:
-                            aid_check = account_options.get(an)
-                            if aid_check == asset["broker_id"]:
-                                account_var.set(an)
-                                break
-                    _refresh_asset_list()
-                    display = f'{asset["name"] or ""} · {asset["ticker"]}'
-                    asset_var.set(display)
-                    _on_asset_select()
+            try:
+                item = self.tree.item(selected[0])
+                sel_asset_id = self._extract_asset_id(item)
+                if sel_asset_id:
+                    asset = get_asset(sel_asset_id)
+                    if asset:
+                        asset = dict(asset)
+                        if asset["broker_id"]:
+                            for an in account_values:
+                                aid_check = account_options.get(an)
+                                if aid_check == asset["broker_id"]:
+                                    account_var.set(an)
+                                    break
+                        _refresh_asset_list()
+                        display = f'{asset["name"] or ""} · {asset["ticker"]}'
+                        asset_var.set(display)
+                        _on_asset_select()
+            except (ValueError, TypeError):
+                pass
 
         # ---- Bindings ----
         account_var.trace_add("write", lambda *_: (_refresh_asset_list(), _update_balance()))
