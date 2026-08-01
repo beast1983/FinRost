@@ -34,7 +34,7 @@ def apply_zebra(tree, odd_bg=ZEBRA_ODD_BG, even_bg=ZEBRA_EVEN_BG, skip_tags=SKIP
 
 
 # Теги-строки, несущие собственный цвет фона (сравнение с прошлым месяцем и т.п.)
-COLOR_TAGS = ('cmp_up', 'cmp_down')
+COLOR_TAGS = ('cmp_up', 'cmp_down', 'drawdown_alert')
 
 
 def reveal_row_colors(tree, color_tags=COLOR_TAGS):

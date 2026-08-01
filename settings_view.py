@@ -9,6 +9,7 @@ from database import (
     get_all_ticker_names, import_ticker_names, add_ticker_name, update_ticker_name, delete_ticker_name, rename_ticker, get_ticker_name, get_ticker_info,
     update_ticker_from_moex, convert_placeholder_tickers,
     get_db_path, backup_database,
+    get_drawdown_limit, set_drawdown_limit,
 )
 from api_client import fetch_cbr_exchange_rates, fetch_ticker_static
 from datetime import datetime
@@ -93,7 +94,7 @@ def _is_header_row(parts):
 
 
 class SettingsView(tb.Frame):
-    """Окно настроек с вкладками: Валюты, Общие."""
+    """Окно настроек с вкладками: Валюты, Хранилище, Тикеры."""
 
     def __init__(self, parent, controller=None):
         super().__init__(parent)
@@ -105,15 +106,15 @@ class SettingsView(tb.Frame):
         self.notebook = tb.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Вкладка "Общие"
-        self.general_tab = GeneralSettingsTab(self.notebook, self)
-        self.notebook.add(self.general_tab, text="Общие")
-
-        # Вкладка "Валюты"
+        # 1) Валюты
         self.currencies_tab = CurrenciesSettingsTab(self.notebook, self)
         self.notebook.add(self.currencies_tab, text="Валюты")
 
-        # Вкладка "Тикеры"
+        # 2) Хранилище + Импорт + Сопоставление тикеров
+        self.storage_tab = StorageSettingsTab(self.notebook, self)
+        self.notebook.add(self.storage_tab, text="Хранилище")
+
+        # 3) Тикеры
         self.tickers_tab = TickerRegistryTab(self.notebook)
         self.notebook.add(self.tickers_tab, text="Тикеры")
 
@@ -139,6 +140,7 @@ class CurrenciesSettingsTab(tb.Frame):
         }
         self.last_update_date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         self._usd_status_var = tk.StringVar(value="")
+        self.drawdown_limit_var = tk.StringVar(value="20.0")
 
         self._create_ui()
         self._load_rates_from_db()
@@ -174,6 +176,22 @@ class CurrenciesSettingsTab(tb.Frame):
         tb.Label(date_frame, text="Дата обновления:").pack(side=tk.LEFT)
         tb.Label(date_frame, textvariable=self.last_update_date_var).pack(side=tk.LEFT, padx=5)
         tb.Label(date_frame, textvariable=self._usd_status_var, foreground="gray").pack(side=tk.LEFT)
+
+        # ─── Лимит просадки ───
+        limit_frame = tb.LabelFrame(self, text="Лимит просадки", padx=10, pady=10)
+        limit_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(
+            limit_frame,
+            text="Максимальное падение цены актива от средней цены покупки,\n"
+                 "после которого он помечается как кандидат на продажу.",
+            foreground="gray", justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
+
+        tb.Label(limit_frame, text="Порог, %:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        limit_entry = tb.Entry(limit_frame, textvariable=self.drawdown_limit_var, width=10)
+        limit_entry.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        _bind_entry_context_menu(limit_entry)
 
         # Общие кнопки
         btn_frame = tb.Frame(self)
@@ -212,6 +230,11 @@ class CurrenciesSettingsTab(tb.Frame):
                 self.cny_rub_rate_var.set(str(row["setting_value"]))
 
             self._usd_status_var.set("")
+            # Лимит просадки
+            cursor.execute("SELECT setting_value FROM settings WHERE setting_key = 'drawdown_limit_pct'")
+            row = cursor.fetchone()
+            if row:
+                self.drawdown_limit_var.set(str(row["setting_value"]))
             conn.close()
         except Exception:
             pass
@@ -395,6 +418,18 @@ class CurrenciesSettingsTab(tb.Frame):
                     ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
                 """, (key, str(rate), today, str(rate), today))
                 saved.append(f"{currency}: {rate} ₽")
+            # Сохранить лимит просадки
+            try:
+                dd_val = float(self.drawdown_limit_var.get())
+                if not (0 <= dd_val <= 100):
+                    messagebox.showerror("Ошибка", "Лимит просадки должен быть от 0 до 100")
+                    conn.close()
+                    return
+                set_drawdown_limit(dd_val)
+            except ValueError:
+                messagebox.showerror("Ошибка", "Введите корректный лимит просадки")
+                conn.close()
+                return
             conn.commit()
             self.last_update_date_var.set(today)
             messagebox.showinfo("Сохранено", "Курсы сохранены:\n" + "\n".join(saved))
@@ -454,8 +489,8 @@ class CurrenciesSettingsTab(tb.Frame):
             conn.close()
 
 
-class GeneralSettingsTab(tb.Frame):
-    """Вкладка общих настроек."""
+class StorageSettingsTab(tb.Frame):
+    """Вкладка «Хранилище»: расположение БД, архивация, импорт, сопоставление тикеров."""
 
     def __init__(self, parent, settings_view):
         super().__init__(parent)
@@ -466,7 +501,6 @@ class GeneralSettingsTab(tb.Frame):
         self._populate_years()
 
     def _create_ui(self):
-        """Создание интерфейса вкладки общие настройки."""
         # ─── Импорт ───
         import_frame = tb.LabelFrame(self, text="Импорт", padx=10, pady=10)
         import_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -545,19 +579,15 @@ class GeneralSettingsTab(tb.Frame):
             command=self._convert_placeholder_tickers, bootstyle="primary"
         ).grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
 
-        # ─── База данных ───
-        db_frame = tb.LabelFrame(self, text="База данных", padx=10, pady=10)
+        # ─── Хранилище (база данных) ───
+        db_frame = tb.LabelFrame(self, text="Хранилище", padx=10, pady=10)
         db_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        row = 0
-
-        tb.Label(db_frame, text="Путь к базе данных:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        tb.Label(db_frame, text="Путь к базе данных:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
         self.db_path_var = tk.StringVar(value=get_db_path())
-        tb.Entry(db_frame, textvariable=self.db_path_var, width=45, state='readonly').grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
-        tb.Button(db_frame, text="Обзор…", command=self._browse_db, bootstyle="primary").grid(row=row, column=2, padx=5, pady=5)
-        row += 1
-
-        tb.Button(db_frame, text="Сохранить как… (копия)", command=self._backup_db, bootstyle="success").grid(row=row, column=0, columnspan=3, pady=5)
+        tb.Entry(db_frame, textvariable=self.db_path_var, width=45, state='readonly').grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+        tb.Button(db_frame, text="Обзор…", command=self._browse_db, bootstyle="primary").grid(row=0, column=2, padx=5, pady=5)
+        tb.Button(db_frame, text="Сохранить как… (копия)", command=self._backup_db, bootstyle="success").grid(row=1, column=0, columnspan=3, pady=5)
 
         # ─── Архивация ───
         arch_frame = tb.LabelFrame(self, text="Архивация", padx=10, pady=10)
@@ -582,6 +612,62 @@ class GeneralSettingsTab(tb.Frame):
         row += 1
 
         tb.Button(arch_frame, text="Сохранить", command=self._save_archive_settings, bootstyle="success").grid(row=row, column=0, columnspan=3, pady=5)
+
+    def _browse_db(self):
+        """Выбрать существующую БД."""
+        path = filedialog.askopenfilename(
+            title="Выберите файл базы данных",
+            filetypes=[("SQLite база данных", "*.db"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, 'rb') as f:
+                header = f.read(16)
+        except OSError:
+            messagebox.showerror("Ошибка", "Не удалось прочитать выбранный файл.")
+            return
+        if header != b"SQLite format 3\x00":
+            messagebox.showerror("Ошибка", "Выбранный файл не является базой данных SQLite.")
+            return
+        from app_config import set_db_path as cfg_set
+        cfg_set(path)
+        self.db_path_var.set(path)
+        messagebox.showinfo("Смена базы данных", "База данных изменена. Программа будет перезапущена.")
+        self.settings_view.controller.relaunch_app()
+
+    def _backup_db(self):
+        """Сохранить копию текущей БД."""
+        default_name = f"investments_backup_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.db"
+        dest = filedialog.asksaveasfilename(
+            title="Сохранить копию базы данных",
+            initialfile=default_name,
+            defaultextension=".db",
+            filetypes=[("SQLite база данных", "*.db"), ("Все файлы", "*.*")],
+        )
+        if not dest:
+            return
+        try:
+            backup_database(dest)
+            messagebox.showinfo("Успех", f"Копия базы данных сохранена:\n{dest}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось сохранить копию:\n{e}")
+
+    def _browse_archive_folder(self):
+        """Выбрать папку для архивов."""
+        folder = filedialog.askdirectory(title="Выберите папку для архивов")
+        if folder:
+            self.archive_folder_var.set(folder)
+
+    def _save_archive_settings(self):
+        """Сохранить настройки архивации."""
+        from app_config import set_archive_settings
+        set_archive_settings(
+            self.archive_enabled_var.get(),
+            int(self.archive_count_var.get()),
+            self.archive_folder_var.get(),
+        )
+        messagebox.showinfo("Сохранено", "Настройки архивации сохранены.")
 
     def _populate_brokers(self):
         """Заполнить комбобокс брокеров."""
@@ -620,7 +706,6 @@ class GeneralSettingsTab(tb.Frame):
 
     def _convert_placeholder_tickers(self):
         """Сопоставить технические тикеры АКТИВ_* с реестром по названию."""
-        # Предварительно посчитать, есть ли что обрабатывать
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
@@ -688,7 +773,7 @@ class GeneralSettingsTab(tb.Frame):
         filepath = self.asset_file_var.get()
 
         if not broker_display:
-            messagebox.showwarning("Брокер не выбран", "Выберите брокер из списка.")
+            messagebox.showwarning("Брокер не выбран", "Выберите брокера из списка.")
             return
         if not year:
             messagebox.showwarning("Год не выбран", "Выберите год.")
@@ -724,7 +809,6 @@ class GeneralSettingsTab(tb.Frame):
             asset_type = parts[2].strip().lower()
             currency_code = parts[3].strip() or 'RUB'
 
-            # Строка баланса — не создаёт актив, заполняет balance_rub
             if asset_type == 'баланс':
                 if balance_row is None:
                     mv = {}
@@ -737,7 +821,6 @@ class GeneralSettingsTab(tb.Frame):
                         balance_row = {'currency_code': currency_code, 'month_values': mv}
                 continue
 
-            # Строка пополнений/выводов — заполняет deposits/withdrawals
             if asset_type == 'пополнил':
                 if deposit_row is None:
                     mv = {}
@@ -792,7 +875,6 @@ class GeneralSettingsTab(tb.Frame):
         months, slices = result
         total_assets = len(asset_rows)
 
-        # Пополнить реестр тикеров: добавить отсутствующие, существующие не перезаписывать
         new_tickers = 0
         for row in asset_rows:
             ticker = row['ticker'].strip()
@@ -838,7 +920,7 @@ class GeneralSettingsTab(tb.Frame):
         filepath = self.income_file_var.get()
 
         if not broker_display:
-            messagebox.showwarning("Брокер не выбран", "Выберите брокер из списка.")
+            messagebox.showwarning("Брокер не выбран", "Выберите брокера из списка.")
             return
         if not year:
             messagebox.showwarning("Год не выбран", "Выберите год.")
@@ -911,67 +993,9 @@ class GeneralSettingsTab(tb.Frame):
         messagebox.showinfo("Импорт завершён", msg)
         self._populate_years()
 
-    def _browse_archive_folder(self):
-        """Выбрать папку для архивов."""
-        folder = filedialog.askdirectory(title="Выберите папку для архивов")
-        if folder:
-            self.archive_folder_var.set(folder)
-
-    def _save_archive_settings(self):
-        """Сохранить настройки архивации."""
-        from app_config import set_archive_settings
-        set_archive_settings(
-            self.archive_enabled_var.get(),
-            int(self.archive_count_var.get()),
-            self.archive_folder_var.get(),
-        )
-        messagebox.showinfo("Сохранено", "Настройки архивации сохранены.")
-
-    def _browse_db(self):
-        """Выбрать существующую БД."""
-        from tkinter import filedialog
-        path = filedialog.askopenfilename(
-            title="Выберите файл базы данных",
-            filetypes=[("SQLite база данных", "*.db"), ("Все файлы", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            with open(path, 'rb') as f:
-                header = f.read(16)
-        except OSError:
-            messagebox.showerror("Ошибка", "Не удалось прочитать выбранный файл.")
-            return
-        if header != b"SQLite format 3\x00":
-            messagebox.showerror("Ошибка", "Выбранный файл не является базой данных SQLite.")
-            return
-        from app_config import set_db_path as cfg_set
-        cfg_set(path)
-        self.db_path_var.set(path)
-        messagebox.showinfo("Смена базы данных", "База данных изменена. Программа будет перезапущена.")
-        self.settings_view.controller.relaunch_app()
-
-    def _backup_db(self):
-        """Сохранить копию текущей БД."""
-        from tkinter import filedialog
-        default_name = f"investments_backup_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.db"
-        dest = filedialog.asksaveasfilename(
-            title="Сохранить копию базы данных",
-            initialfile=default_name,
-            defaultextension=".db",
-            filetypes=[("SQLite база данных", "*.db"), ("Все файлы", "*.*")],
-        )
-        if not dest:
-            return
-        try:
-            backup_database(dest)
-            messagebox.showinfo("Успех", f"Копия базы данных сохранена:\n{dest}")
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось сохранить копию:\n{e}")
-
 
 # ═══════════════════════════════════════════════════════════
-#  Вкладка «Реестр тикеров»
+#  Вкладка «Реестр тикеров"  
 # ═══════════════════════════════════════════════════════════
 
 _TYPE_MAP = {'акция': 'Акция', 'облигация': 'Облигация', 'etf': 'ETF'}

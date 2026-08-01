@@ -283,6 +283,9 @@ class IncomeTab(tb.Frame):
     def __init__(self, parent, controller=None):
         super().__init__(parent)
         self.controller = controller
+        self._hover_bars = []      # список (month_label, coupons, dividends)
+        self._hover_annotation = None
+        self._bar_rects = []       # список (bar_coupon, bar_dividend)
         self._create_ui()
         self._update_filters()
         self.refresh()
@@ -333,6 +336,13 @@ class IncomeTab(tb.Frame):
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.figure, master=chart_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Аннотация-подсказка (пересоздаётся в refresh() после ax.clear())
+        self._create_tooltip()
+
+        # Привязка движения мыши
+        self.canvas.mpl_connect("motion_notify_event", self._on_hover)
+        self.canvas.mpl_connect("axes_leave_event", self._on_leave)
 
         # Таблица
         table_frame = tb.LabelFrame(self, text="Доходы", padx=5, pady=5)
@@ -401,6 +411,7 @@ class IncomeTab(tb.Frame):
 
         if not rows:
             self.ax.clear()
+            self._create_tooltip()
             self.ax.set_title("Нет данных")
             self.canvas.draw()
             try:
@@ -437,6 +448,9 @@ class IncomeTab(tb.Frame):
 
         # ── График (stacked bar) ──
         self.ax.clear()
+        self._create_tooltip()
+        self._bar_rects = []
+        self._hover_bars = []
         if year_from == year_to:
             chart_title = f"Доходы — {year_from} г."
         else:
@@ -447,12 +461,16 @@ class IncomeTab(tb.Frame):
         width = 0.6
 
         if type_filter == 'Все доходы':
-            self.ax.bar(x, coupons, width, label='Купоны', color='orange')
-            self.ax.bar(x, dividends, width, bottom=coupons, label='Дивиденды', color='green')
+            bars_c = self.ax.bar(x, coupons, width, label='Купоны', color='orange')
+            bars_d = self.ax.bar(x, dividends, width, bottom=coupons, label='Дивиденды', color='green')
+            self._bar_rects = list(zip(bars_c, bars_d))
         elif type_filter == 'Купоны':
-            self.ax.bar(x, coupons, width, label='Купоны', color='orange')
+            bars_c = self.ax.bar(x, coupons, width, label='Купоны', color='orange')
+            self._bar_rects = [(b, None) for b in bars_c]
         elif type_filter == 'Дивиденды':
-            self.ax.bar(x, dividends, width, label='Дивиденды', color='green')
+            bars_d = self.ax.bar(x, dividends, width, label='Дивиденды', color='green')
+            self._bar_rects = [(None, b) for b in bars_d]
+        self._hover_bars = list(zip(month_names, coupons, dividends))
 
         unique_years = []
         for y in year_labels:
@@ -511,6 +529,54 @@ class IncomeTab(tb.Frame):
             ))
 
         apply_zebra(self.tree)
+
+    def _create_tooltip(self):
+        """Создать аннотацию-подсказку на self.ax.
+
+        Вызывается после каждого ax.clear() в refresh(), т.к. clear() удаляет
+        все artists (включая аннотации) с оси.
+        """
+        self._tooltip = self.ax.annotate(
+            "", xy=(0, 0), xytext=(-15, 14), textcoords="offset points",
+            bbox=dict(boxstyle="round,pad=0.4", fc="#FFFCE0", ec="#888", lw=0.8),
+            fontsize=9, annotation_clip=False, horizontalalignment='right',
+        )
+        self._tooltip.set_visible(False)
+
+    def _on_hover(self, event):
+        """Показать всплывающую сумму при наведении на столбец."""
+        if event.inaxes != self.ax or not getattr(self, "_bar_rects", None):
+            if self._tooltip.get_visible():
+                self._tooltip.set_visible(False)
+                self.canvas.draw_idle()
+            return
+
+        for idx, (b_c, b_d) in enumerate(self._bar_rects):
+            rects = [r for r in (b_c, b_d) if r is not None]
+            if any(r.contains(event)[0] for r in rects):
+                month, cp, dv = self._hover_bars[idx]
+                total = cp + dv
+                lines = [f"{month}:  {total:,.2f} ₽".replace(",", " ")]
+                if b_c is not None and cp:
+                    lines.append(f"  купоны: {cp:,.2f}".replace(",", " "))
+                if b_d is not None and dv:
+                    lines.append(f"  дивиденды: {dv:,.2f}".replace(",", " "))
+                # Привязка к курсору: подсказка чуть выше и правее мышки
+                self._tooltip.xy = (event.xdata, event.ydata)
+                self._tooltip.set_text("\n".join(lines))
+                self._tooltip.set_visible(True)
+                self.canvas.draw_idle()
+                return
+
+        if self._tooltip.get_visible():
+            self._tooltip.set_visible(False)
+            self.canvas.draw_idle()
+
+    def _on_leave(self, _event):
+        """Скрыть подсказку при уходе мыши с оси."""
+        if self._tooltip.get_visible():
+            self._tooltip.set_visible(False)
+            self.canvas.draw_idle()
 
 
 # ═══════════════════════════════════════════════════════════

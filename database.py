@@ -1624,6 +1624,40 @@ def import_asset_slices(broker_id, year, asset_rows, balance_row=None, deposit_r
 #  Валютные курсы
 # ================================================================
 
+DEFAULT_DRAWDOWN_LIMIT = 20.0  # %
+
+
+def get_drawdown_limit():
+    """Вернуть лимит просадки в процентах (по умолчанию 20)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT setting_value FROM settings WHERE setting_key = 'drawdown_limit_pct'")
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        try:
+            return float(row["setting_value"])
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_DRAWDOWN_LIMIT
+
+
+def set_drawdown_limit(value: float):
+    """Сохранить лимит просадки."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO settings (setting_key, setting_value, updated_at)
+            VALUES ('drawdown_limit_pct', ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+        """, (str(value), today, str(value), today))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_exchange_rates():
     """Получить курсы валют из настроек."""
     conn = get_connection()

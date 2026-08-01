@@ -10,6 +10,7 @@ from database import (
     credit_coupon_or_dividend, get_currencies, get_currency_id,
     get_ticker_name, get_ticker_info, search_ticker_names,
     update_ticker_name, update_ticker_from_moex,
+    get_drawdown_limit,
 )
 from datetime import datetime
 from api_client import (
@@ -127,6 +128,8 @@ class AssetsView(tb.Frame):
         # Подсветка сравнения текущей цены со средней ценой покупки
         self.tree.tag_configure('cmp_up', background='#dff0d8')   # выросла — в плюсе
         self.tree.tag_configure('cmp_down', background='#f2dede')  # упала — в убытке
+        # Кандидат на продажу: жёлтая линия (заливка) + тёмно-красный текст
+        self.tree.tag_configure('drawdown_alert', background='#FFF3B0', foreground='#8B0000')
 
         # Скроллбар
         scrollbar = tb.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -151,7 +154,7 @@ class AssetsView(tb.Frame):
         # Переключатель сравнения текущей цены со средней ценой покупки
         self.compare_avg_var = tk.BooleanVar(value=True)
         tb.Checkbutton(
-            btn_frame, text="Сравнение со средней",
+            btn_frame, text=f"Сравнение со средней (лимит просадки: {get_drawdown_limit():.0f} %)",
             variable=self.compare_avg_var, command=self.refresh,
         ).pack(side=tk.LEFT, padx=8)
 
@@ -181,7 +184,7 @@ class AssetsView(tb.Frame):
             return asset["currency_code"] or "RUB"
         return "RUB"
 
-    _FUNC_TAGS = ('cmp_up', 'cmp_down', 'group_header', 'zebra_odd', 'zebra_even', 'colored')
+    _FUNC_TAGS = ('cmp_up', 'cmp_down', 'drawdown_alert', 'group_header', 'zebra_odd', 'zebra_even', 'colored')
 
     def _extract_asset_id(self, item):
         """Достать числовой ID актива из тэгов строки, пропуская служебные тэги."""
@@ -351,6 +354,7 @@ class AssetsView(tb.Frame):
 
     def refresh(self):
         """Обновление таблицы."""
+        self._drawdown_limit = get_drawdown_limit()
         try:
             children = self.tree.tk.call(self.tree._w, "children", "")
         except Exception:
@@ -462,14 +466,20 @@ class AssetsView(tb.Frame):
                 # Сравнение текущей цены со средней ценой покупки (доходность после покупки).
                 # Цены в одном масштабе (валюта бумаги; облигации — % от номинала),
                 # поэтому сравниваем напрямую. Зелёный — выросла, красный — упала.
+                # Порог в процентах; превышение лимита просадки → кандидат на продажу.
                 cmp_tag = ()
                 if self.compare_avg_var.get():
                     avg = asset["avg_price"] or 0
                     curr = asset["current_price"] or 0
                     if avg > 0 and curr > 0:
-                        if curr - avg > 1.0:
+                        diff_pct = (curr - avg) / avg * 100.0
+                        # 1) Кандидат на продажу — превышение лимита просадки
+                        if diff_pct <= -self._drawdown_limit:
+                            cmp_tag = ('drawdown_alert',)
+                        # 2) Обычная подсветка роста/падения
+                        elif diff_pct > 1.0:
                             cmp_tag = ('cmp_up',)
-                        elif avg - curr > 1.0:
+                        elif diff_pct < -1.0:
                             cmp_tag = ('cmp_down',)
 
                 self.tree.insert('', tk.END, values=(
