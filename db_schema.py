@@ -19,6 +19,13 @@ def init_schema():
     ALTER-миграции.
     """
     conn = get_connection()
+    # WAL устанавливается один раз при старте приложения. В get_connection()
+    # этот PRAGMA намеренно убран — повторная установка на каждом подключении
+    # не подчиняется busy_timeout и вызывает "database is locked".
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     cursor = conn.cursor()
 
     # Наличие db_version — индикатор существующей БД

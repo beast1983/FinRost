@@ -1,7 +1,7 @@
 import tkinter as tk
 import ttkbootstrap as tb
 from tkinter import messagebox
-from database import get_all_transactions, get_transactions_count, get_transaction_years
+from database import get_all_transactions, get_transactions_count, get_transaction_years, delete_transaction
 from datetime import datetime
 import math
 from table_utils import apply_zebra
@@ -94,6 +94,9 @@ class TransactionsView(tb.Frame):
         # Сбросить
         tb.Button(filter_frame, text="Сбросить", command=self._on_reset, bootstyle="secondary").pack(side=tk.LEFT, padx=(10, 0))
 
+        # Удалить
+        tb.Button(filter_frame, text="Удалить", command=self._delete_transaction, bootstyle="danger").pack(side=tk.LEFT, padx=(10, 0))
+
         # Таблица
         columns = ('id', 'date', 'type', 'account', 'ticker', 'amount', 'currency', 'notes')
         self.tree = tb.Treeview(self, columns=columns, show='headings', height=20)
@@ -167,6 +170,40 @@ class TransactionsView(tb.Frame):
         if self.current_page > 1:
             self.current_page -= 1
             self.refresh()
+
+    def _delete_transaction(self):
+        """Удалить выбранную транзакцию с откатом баланса."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Внимание", "Выберите транзакцию")
+            return
+
+        item = self.tree.item(selected[0])
+        values = item["values"]
+        tx_id = values[0]
+        tx_type_display = values[2]
+        tx_date = values[1]
+        amount_str = values[5]
+        account_name = values[3]
+
+        try:
+            amount_val = float(amount_str.replace(",", ""))
+        except (ValueError, TypeError):
+            amount_val = 0.0
+
+        if not messagebox.askyesno(
+            "Подтверждение",
+            f"Удалить транзакцию?\n{tx_type_display} • {tx_date} • {amount_str} • {account_name}\n\n"
+            f"Баланс счёта будет скорректирован."
+        ):
+            return
+
+        ok, message = delete_transaction(tx_id)
+        if ok:
+            self.refresh()
+            messagebox.showinfo("Удалено", message)
+        else:
+            messagebox.showwarning("Невозможно", message)
 
     def _next_page(self):
         """Переход на следующую страницу."""

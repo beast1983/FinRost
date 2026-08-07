@@ -10,6 +10,7 @@ from database import (
     update_ticker_from_moex, convert_placeholder_tickers,
     get_db_path, backup_database,
     get_drawdown_limit, set_drawdown_limit,
+    _write_lock,
 )
 from api_client import fetch_cbr_exchange_rates, fetch_ticker_static
 from datetime import datetime
@@ -253,22 +254,23 @@ class CurrenciesSettingsTab(tb.Frame):
             self.last_update_date_var.set(today)
 
             # Сохраняем в БД
-            conn = get_connection()
-            cursor = conn.cursor()
-            try:
-                cursor.execute("""
-                    INSERT INTO settings (setting_key, setting_value, updated_at)
-                    VALUES ('usd_rub_rate', ?, ?)
-                    ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
-                """, (str(round(new_rate, 4)), today, str(round(new_rate, 4)), today))
-                conn.commit()
-                self._usd_status_var.set("✓ Обновлено")
-                messagebox.showinfo("Успех", f"Курс USD обновлён с ЦБ РФ:\n{new_rate:.4f} ₽ за 1 USD")
-            except Exception as e:
-                conn.rollback()
-                messagebox.showerror("Ошибка", f"Не удалось сохранить курс: {e}")
-            finally:
-                conn.close()
+            with _write_lock:
+                conn = get_connection()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("""
+                        INSERT INTO settings (setting_key, setting_value, updated_at)
+                        VALUES ('usd_rub_rate', ?, ?)
+                        ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+                    """, (str(round(new_rate, 4)), today, str(round(new_rate, 4)), today))
+                    conn.commit()
+                    self._usd_status_var.set("✓ Обновлено")
+                    messagebox.showinfo("Успех", f"Курс USD обновлён с ЦБ РФ:\n{new_rate:.4f} ₽ за 1 USD")
+                except Exception as e:
+                    conn.rollback()
+                    messagebox.showerror("Ошибка", f"Не удалось сохранить курс: {e}")
+                finally:
+                    conn.close()
         else:
             self._usd_status_var.set("✗ Ошибка")
             messagebox.showwarning("Не обновлено",
@@ -287,21 +289,22 @@ class CurrenciesSettingsTab(tb.Frame):
             self.last_update_date_var.set(today)
 
             # Сохраняем в БД
-            conn = get_connection()
-            cursor = conn.cursor()
-            try:
-                cursor.execute("""
-                    INSERT INTO settings (setting_key, setting_value, updated_at)
-                    VALUES ('eur_rub_rate', ?, ?)
-                    ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
-                """, (str(round(new_rate, 4)), today, str(round(new_rate, 4)), today))
-                conn.commit()
-                messagebox.showinfo("Успех", f"Курс EUR обновлён с ЦБ РФ:\n{new_rate:.4f} ₽ за 1 EUR")
-            except Exception as e:
-                conn.rollback()
-                messagebox.showerror("Ошибка", f"Не удалось сохранить курс: {e}")
-            finally:
-                conn.close()
+            with _write_lock:
+                conn = get_connection()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("""
+                        INSERT INTO settings (setting_key, setting_value, updated_at)
+                        VALUES ('eur_rub_rate', ?, ?)
+                        ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+                    """, (str(round(new_rate, 4)), today, str(round(new_rate, 4)), today))
+                    conn.commit()
+                    messagebox.showinfo("Успех", f"Курс EUR обновлён с ЦБ РФ:\n{new_rate:.4f} ₽ за 1 EUR")
+                except Exception as e:
+                    conn.rollback()
+                    messagebox.showerror("Ошибка", f"Не удалось сохранить курс: {e}")
+                finally:
+                    conn.close()
         else:
             messagebox.showwarning("Не обновлено",
                                    "Не удалось получить курс EUR с ЦБ РФ.\n"
@@ -320,19 +323,20 @@ class CurrenciesSettingsTab(tb.Frame):
 
             conn = get_connection()
             cursor = conn.cursor()
-            try:
-                cursor.execute("""
-                    INSERT INTO settings (setting_key, setting_value, updated_at)
-                    VALUES ('cny_rub_rate', ?, ?)
-                    ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
-                """, (str(round(new_rate, 4)), today, str(round(new_rate, 4)), today))
-                conn.commit()
-                messagebox.showinfo("Успех", f"Курс CNY обновлён с ЦБ РФ:\n{new_rate:.4f} ₽ за 1 CNY")
-            except Exception as e:
-                conn.rollback()
-                messagebox.showerror("Ошибка", f"Не удалось сохранить курс: {e}")
-            finally:
-                conn.close()
+            with _write_lock:
+                try:
+                    cursor.execute("""
+                        INSERT INTO settings (setting_key, setting_value, updated_at)
+                        VALUES ('cny_rub_rate', ?, ?)
+                        ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+                    """, (str(round(new_rate, 4)), today, str(round(new_rate, 4)), today))
+                    conn.commit()
+                    messagebox.showinfo("Успех", f"Курс CNY обновлён с ЦБ РФ:\n{new_rate:.4f} ₽ за 1 CNY")
+                except Exception as e:
+                    conn.rollback()
+                    messagebox.showerror("Ошибка", f"Не удалось сохранить курс: {e}")
+                finally:
+                    conn.close()
         else:
             messagebox.showwarning("Не обновлено",
                                    "Не удалось получить курс CNY с ЦБ РФ.\n"
@@ -364,29 +368,30 @@ class CurrenciesSettingsTab(tb.Frame):
             ("cny_rub_rate", "CNY", self.cny_rub_rate_var),
         ]
 
-        conn = get_connection()
-        cursor = conn.cursor()
-        try:
-            for key, currency, var in mapping:
-                if currency in rates:
-                    new_rate = round(rates[currency], 4)
-                    var.set(str(new_rate))
-                    cursor.execute("""
-                        INSERT INTO settings (setting_key, setting_value, updated_at)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
-                    """, (key, str(new_rate), today, str(new_rate), today))
-                    updated.append(f"{currency}: {new_rate:.4f} ₽")
-            conn.commit()
-            self.last_update_date_var.set(today)
-            self._usd_status_var.set("✓ Обновлено")
-            messagebox.showinfo("Успех", "Курсы обновлены с ЦБ РФ:\n" + "\n".join(updated))
-        except Exception as e:
-            conn.rollback()
-            self._usd_status_var.set("✗ Ошибка")
-            messagebox.showerror("Ошибка", f"Не удалось сохранить курсы: {e}")
-        finally:
-            conn.close()
+        with _write_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            try:
+                for key, currency, var in mapping:
+                    if currency in rates:
+                        new_rate = round(rates[currency], 4)
+                        var.set(str(new_rate))
+                        cursor.execute("""
+                            INSERT INTO settings (setting_key, setting_value, updated_at)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+                        """, (key, str(new_rate), today, str(new_rate), today))
+                        updated.append(f"{currency}: {new_rate:.4f} ₽")
+                conn.commit()
+                self.last_update_date_var.set(today)
+                self._usd_status_var.set("✓ Обновлено")
+                messagebox.showinfo("Успех", "Курсы обновлены с ЦБ РФ:\n" + "\n".join(updated))
+            except Exception as e:
+                conn.rollback()
+                self._usd_status_var.set("✗ Ошибка")
+                messagebox.showerror("Ошибка", f"Не удалось сохранить курсы: {e}")
+            finally:
+                conn.close()
 
     def _save_all_rates(self):
         """Сохранение всех курсов (ручной ввод)."""
@@ -396,48 +401,56 @@ class CurrenciesSettingsTab(tb.Frame):
             ("cny_rub_rate", "CNY", self.cny_rub_rate_var),
         ]
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        conn = get_connection()
-        cursor = conn.cursor()
-        try:
-            saved = []
-            for key, currency, var in mapping:
-                try:
-                    rate = float(var.get())
-                    if rate <= 0:
-                        messagebox.showerror("Ошибка", f"Курс {currency} должен быть положительным числом")
-                        conn.close()
-                        return
-                except ValueError:
-                    messagebox.showerror("Ошибка", f"Введите корректный курс для {currency}")
-                    conn.close()
-                    return
-                cursor.execute("""
-                    INSERT INTO settings (setting_key, setting_value, updated_at)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
-                """, (key, str(rate), today, str(rate), today))
-                saved.append(f"{currency}: {rate} ₽")
-            # Сохранить лимит просадки
+        # Валидация до захвата блокировки и соединения
+        validated = []
+        for key, currency, var in mapping:
             try:
-                dd_val = float(self.drawdown_limit_var.get())
-                if not (0 <= dd_val <= 100):
-                    messagebox.showerror("Ошибка", "Лимит просадки должен быть от 0 до 100")
-                    conn.close()
+                rate = float(var.get())
+                if rate <= 0:
+                    messagebox.showerror("Ошибка", f"Курс {currency} должен быть положительным числом")
                     return
-                set_drawdown_limit(dd_val)
             except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректный лимит просадки")
-                conn.close()
+                messagebox.showerror("Ошибка", f"Введите корректный курс для {currency}")
                 return
-            conn.commit()
-            self.last_update_date_var.set(today)
-            messagebox.showinfo("Сохранено", "Курсы сохранены:\n" + "\n".join(saved))
-        except Exception as e:
-            conn.rollback()
-            messagebox.showerror("Ошибка", f"Не удалось сохранить курсы: {e}")
-        finally:
-            conn.close()
+            validated.append((key, currency, rate))
+
+        # Лимит просадки — тоже валидируем заранее
+        try:
+            dd_val = float(self.drawdown_limit_var.get())
+            if not (0 <= dd_val <= 100):
+                messagebox.showerror("Ошибка", "Лимит просадки должен быть от 0 до 100")
+                return
+        except ValueError:
+            messagebox.showerror("Ошибка", "Введите корректный лимит просадки")
+            return
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        with _write_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            try:
+                saved = []
+                for key, currency, rate in validated:
+                    cursor.execute("""
+                        INSERT INTO settings (setting_key, setting_value, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+                    """, (key, str(rate), today, str(rate), today))
+                    saved.append(f"{currency}: {rate} ₽")
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                messagebox.showerror("Ошибка", f"Не удалось сохранить курсы: {e}")
+                return
+            finally:
+                conn.close()
+
+        # Вне _write_lock и соединения: set_drawdown_limit открывает собственное
+        # соединение и пишет в ту же таблицу settings. Внутри блокировки это
+        # приводило к двум незакоммиченным write-транзакциям и "database is locked".
+        set_drawdown_limit(dd_val)
+        self.last_update_date_var.set(today)
+        messagebox.showinfo("Сохранено", "Курсы сохранены:\n" + "\n".join(saved))
 
     def _save_usd_rate(self):
         """Сохранение курса USD (ручной ввод)."""
@@ -470,23 +483,24 @@ class CurrenciesSettingsTab(tb.Frame):
             return
 
         today = datetime.now().strftime("%Y-%m-%d")
-        conn = get_connection()
-        cursor = conn.cursor()
+        with _write_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
 
-        try:
-            cursor.execute("""
-                INSERT INTO settings (setting_key, setting_value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
-            """, (setting_key, str(rate), today, str(rate), today))
-            conn.commit()
-            self.last_update_date_var.set(today)
-            messagebox.showinfo("Успех", f"Курс {currency_name} сохранён: {rate} ₽ за 1 {currency_name}")
-        except Exception as e:
-            conn.rollback()
-            messagebox.showerror("Ошибка", f"Не удалось сохранить курс: {e}")
-        finally:
-            conn.close()
+            try:
+                cursor.execute("""
+                    INSERT INTO settings (setting_key, setting_value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+                """, (setting_key, str(rate), today, str(rate), today))
+                conn.commit()
+                self.last_update_date_var.set(today)
+                messagebox.showinfo("Успех", f"Курс {currency_name} сохранён: {rate} ₽ за 1 {currency_name}")
+            except Exception as e:
+                conn.rollback()
+                messagebox.showerror("Ошибка", f"Не удалось сохранить курс: {e}")
+            finally:
+                conn.close()
 
 
 class StorageSettingsTab(tb.Frame):

@@ -1,6 +1,8 @@
 import sqlite3
 import sys
 import os
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 import calendar
@@ -34,16 +36,42 @@ def get_db_path():
 
 
 def get_connection():
-    """Подключение к базе данных."""
+    """Подключение к базе данных.
+
+    WAL-режим устанавливается один раз при старте приложения в init_schema()
+    (см. db_schema.py). Повторная установка PRAGMA journal_mode на каждом
+    подключении не подчиняется busy_timeout и при конкуренции с фоновыми
+    write-потоками мгновенно выбрасывает "database is locked".
+    """
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout=30000")
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.OperationalError:
-        pass
     return conn
+
+
+# Глобальная блокировка записи: сериализует write-операции между UI-потоком
+# и фоновым потоком обновления цен (assets_view._refresh_worker), чтобы
+# не полагаться только на внутренние блокировки SQLite.
+_write_lock = threading.Lock()
+
+
+@contextmanager
+def db_write():
+    """Контекст write-транзакции: держит _write_lock, коммитит в конце.
+
+    Используется для serialize длительных составных write-операций.
+    """
+    with _write_lock:
+        conn = get_connection()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def backup_database(dest_path):
@@ -771,6 +799,71 @@ def get_all_transactions(account_id=None, tx_type=None, year=None, month=None, l
 def get_account_transactions(account_id):
     """Получить транзакции конкретного счёта."""
     return get_all_transactions(account_id=account_id)
+
+
+def delete_transaction(tx_id):
+    """Удалить транзакцию и откатить изменение баланса.
+
+    Возвращает (ok: bool, message: str).
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT id, tx_type, account_id, amount, date FROM transactions WHERE id = ?",
+            (tx_id,)
+        )
+        tx = cursor.fetchone()
+        if not tx:
+            conn.close()
+            return False, "Транзакция не найдена"
+
+        tx_type = tx["tx_type"]
+        account_id = tx["account_id"]
+        amount = tx["amount"]
+        tx_date = tx["date"]
+
+        if tx_type in ('покупка', 'продажа'):
+            conn.close()
+            return False, "Удаление покупок/продаж не поддерживается"
+
+        # Откат баланса
+        cursor.execute("SELECT balance FROM accounts WHERE id = ?", (account_id,))
+        acc = cursor.fetchone()
+        if not acc:
+            conn.close()
+            return False, "Счёт не найден"
+
+        if tx_type == 'пополнение':
+            new_bal = round_price(acc["balance"] - amount)
+        elif tx_type == 'списание':
+            new_bal = round_price(acc["balance"] + amount)
+        elif tx_type in ('купон', 'дивиденд'):
+            new_bal = round_price(acc["balance"] - amount)
+        else:
+            conn.close()
+            return False, "Неизвестный тип транзакции"
+
+        cursor.execute("UPDATE accounts SET balance = ? WHERE id = ?", (new_bal, account_id))
+        cursor.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+        conn.commit()
+
+        message = f"Транзакция удалена. Баланс скорректирован."
+        if new_bal < 0:
+            message += f" ВНИМАНИЕ: баланс стал отрицательным ({new_bal:.2f})."
+
+        # Обновить текущий срез, если транзакция из текущего месяца
+        today_ym = datetime.now().strftime("%Y-%m")
+        if tx_date[:7] == today_ym:
+            save_snapshot(target_ym=today_ym)
+
+        conn.close()
+        return True, message
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def add_transaction_internal(cursor, tx_type, account_id, amount, currency_id, ticker='',
@@ -1710,38 +1803,45 @@ def calculate_total_in_rubles(quantity, avg_price, currency_id, rates, asset_typ
 # ================================================================
 
 def update_asset_price(asset_id, current_price, last_update, face_value=None, lot_size=None, lot_value=None, list_level=None, coupon_percent=None):
-    """Обновить текущую цену, дату и (опционально) метаданные облигации."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    sets = []
-    params = []
-    sets.append("current_price = ?")
-    params.append(current_price)
-    sets.append("last_update = ?")
-    params.append(last_update)
-    if face_value is not None:
-        sets.append("face_value = ?")
-        params.append(face_value)
-    if lot_size is not None:
-        sets.append("lot_size = ?")
-        params.append(lot_size)
-    if lot_value is not None:
-        sets.append("lot_value = ?")
-        params.append(lot_value)
-    if list_level is not None:
-        sets.append("list_level = ?")
-        params.append(list_level)
-    if coupon_percent is not None:
-        sets.append("coupon_percent = ?")
-        params.append(coupon_percent)
-    params.append(asset_id)
-    cursor.execute(f"""
-        UPDATE assets
-        SET {', '.join(sets)}
-        WHERE id = ?
-    """, tuple(params))
-    conn.commit()
-    conn.close()
+    """Обновить текущую цену, дату и (опционально) метаданные облигации.
+
+    Может вызываться из фонового потока обновления цен, поэтому write
+    сериализуется глобальным _write_lock.
+    """
+    with _write_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            sets = []
+            params = []
+            sets.append("current_price = ?")
+            params.append(current_price)
+            sets.append("last_update = ?")
+            params.append(last_update)
+            if face_value is not None:
+                sets.append("face_value = ?")
+                params.append(face_value)
+            if lot_size is not None:
+                sets.append("lot_size = ?")
+                params.append(lot_size)
+            if lot_value is not None:
+                sets.append("lot_value = ?")
+                params.append(lot_value)
+            if list_level is not None:
+                sets.append("list_level = ?")
+                params.append(list_level)
+            if coupon_percent is not None:
+                sets.append("coupon_percent = ?")
+                params.append(coupon_percent)
+            params.append(asset_id)
+            cursor.execute(f"""
+                UPDATE assets
+                SET {', '.join(sets)}
+                WHERE id = ?
+            """, tuple(params))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ================================================================
