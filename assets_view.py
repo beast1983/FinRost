@@ -88,7 +88,7 @@ class AssetsView(tb.Frame):
         table_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
         # Treeview для отображения активов
-        columns = ('name', 'ticker', 'coupon_percent', 'asset_type', 'list_level', 'quantity', 'lot_value', 'avg_price', 'current_price', 'total_value', 'purchase_date', 'last_update', 'currency')
+        columns = ('name', 'portfolio_pct', 'coupon_percent', 'asset_type', 'list_level', 'quantity', 'lot_value', 'avg_price', 'current_price', 'total_value', 'purchase_date', 'last_update', 'currency')
         self.tree = tb.Treeview(table_frame, columns=columns, show='headings', height=20)
 
         style = tb.Style()
@@ -96,11 +96,11 @@ class AssetsView(tb.Frame):
 
         # Настройка колонок
         self.tree.heading('name', text='Название бумаги')
-        self.tree.heading('ticker', text='Код')
+        self.tree.heading('portfolio_pct', text='% портф.')
         self.tree.heading('coupon_percent', text='Ставка %')
         self.tree.heading('asset_type', text='Тип')
         self.tree.heading('list_level', text='Уровень')
-        self.tree.heading('quantity', text='Количество')
+        self.tree.heading('quantity', text='Кол-во')
         self.tree.heading('lot_value', text='Лот')
         self.tree.heading('avg_price', text='Средняя цена')
         self.tree.heading('current_price', text='Текущая цена')
@@ -109,12 +109,12 @@ class AssetsView(tb.Frame):
         self.tree.heading('last_update', text='Последнее обновление')
         self.tree.heading('currency', text='Валюта')
 
-        self.tree.column('name', width=150)
-        self.tree.column('ticker', width=70)
+        self.tree.column('name', width=130)
+        self.tree.column('portfolio_pct', width=60, anchor=tk.CENTER)
         self.tree.column('coupon_percent', width=80, anchor=tk.CENTER)
         self.tree.column('asset_type', width=60)
         self.tree.column('list_level', width=60, anchor=tk.CENTER)
-        self.tree.column('quantity', width=80, anchor=tk.CENTER)
+        self.tree.column('quantity', width=60, anchor=tk.CENTER)
         self.tree.column('lot_value', width=90, anchor=tk.E)
         self.tree.column('avg_price', width=80, anchor=tk.E)
         self.tree.column('current_price', width=85, anchor=tk.E)
@@ -401,14 +401,28 @@ class AssetsView(tb.Frame):
                 )
             )
             broker_name = self._get_account_name(broker_id)
-            
-            # Заголовок группы (счёт)
-            group_label = f"── {broker_name} ──" if broker_name != "—" else "── Не указан ──"
-            self.tree.insert('', tk.END, values=group_label, tag='group_header')
 
+            # Баланс счёта в рублях — для расчёта % портфеля (активы + кэш по счету)
+            balance_rub = 0.0
+            if broker_id:
+                acc = get_account(broker_id)
+                if acc:
+                    bal = acc["balance"] or 0.0
+                    acc_code = acc["currency_code"] or "RUB"
+                    if acc_code == "USD":
+                        bal *= rates.get("USD", 90.0)
+                    elif acc_code == "EUR":
+                        bal *= rates.get("EUR", 100.0)
+                    elif acc_code == "CNY":
+                        bal *= rates.get("CNY", 12.0)
+                    balance_rub = bal
+
+            # Первый проход: считаем total_rub каждого актива и собираем поля отображения
+            rendered = []
+            group_assets_total = 0.0
             for asset in broker_assets:
                 currency = self._get_currency_from_asset(asset)
-                
+
                 # Рассчитываем общую стоимость в рублях (по текущей цене)
                 price_for_total = asset["current_price"] or asset["avg_price"]
                 if asset["asset_type"] == "облигация":
@@ -423,20 +437,20 @@ class AssetsView(tb.Frame):
                     total_rub *= rates.get("EUR", 100.0)
                 elif currency == "CNY":
                     total_rub *= rates.get("CNY", 12.0)
-                
+
                 type_map = {"акция": "Акция", "облигация": "Облигация", "etf": "ETF"}
                 display_type = type_map.get(asset["asset_type"], asset["asset_type"])
-                
+
                 # Название бумаги
                 name = asset["name"] or "—"
-                
+
                 # Текущая цена с пометкой о актуальности
                 current_price = asset["current_price"] or 0
                 last_update = asset["last_update"]
-                
+
                 # Проверяем актуальность цены
                 is_stale = self._is_price_stale(last_update)
-                
+
                 if current_price > 0 and not is_stale:
                     price_str = f"{current_price:.2f}"
                     update_display = last_update[:10] if last_update else "never"
@@ -446,7 +460,7 @@ class AssetsView(tb.Frame):
                 else:
                     price_str = "нет данных"
                     update_display = "never"
-                
+
                 # Уровень листинга
                 list_level = asset["list_level"]
                 list_level_display = str(list_level) if list_level is not None else "—"
@@ -458,7 +472,7 @@ class AssetsView(tb.Frame):
                 else:
                     lot_size = asset["lot_size"]
                     lot_display = str(lot_size) if lot_size is not None else "—"
-                
+
                 # Купонная ставка
                 cp = asset["coupon_percent"]
                 coupon_display = f"{cp:.2f}" if cp is not None else "—"
@@ -482,21 +496,56 @@ class AssetsView(tb.Frame):
                         elif diff_pct < -1.0:
                             cmp_tag = ('cmp_down',)
 
+                rendered.append({
+                    "id": asset["id"],
+                    "name": name,
+                    "total_rub": total_rub,
+                    "coupon_display": coupon_display,
+                    "display_type": display_type,
+                    "list_level_display": list_level_display,
+                    "quantity": asset["quantity"],
+                    "lot_display": lot_display,
+                    "avg_price_str": f"{asset['avg_price']:.2f}",
+                    "price_str": price_str,
+                    "total_str": f"{total_rub:.2f}",
+                    "purchase_date": asset["purchase_date"],
+                    "update_display": update_display,
+                    "currency": currency,
+                    "cmp_tag": cmp_tag,
+                })
+                group_assets_total += total_rub
+
+            # Итого по портфелю счета = стоимость активов + кэш на счету
+            portfolio_total = group_assets_total + balance_rub
+
+            # Заголовок группы (счёт) с итогом по портфелю
+            group_label = f"── {broker_name} ──" if broker_name != "—" else "── Не указан ──"
+            if portfolio_total > 0:
+                group_label += f"   Итого: {portfolio_total:.0f} ₽"
+            self.tree.insert('', tk.END, values=group_label, tag='group_header')
+
+            # Второй проход: вставка строк с % портфеля
+            for r in rendered:
+                if portfolio_total > 0:
+                    pct = r["total_rub"] / portfolio_total * 100.0
+                    pct_str = f"{pct:.1f}%"
+                else:
+                    pct_str = "—"
                 self.tree.insert('', tk.END, values=(
-                    name,
-                    asset["ticker"],
-                    coupon_display,
-                    display_type,
-                    list_level_display,
-                    asset["quantity"],
-                    lot_display,
-                    f"{asset['avg_price']:.2f}",
-                    price_str,
-                    f"{total_rub:.2f}",
-                    asset["purchase_date"],
-                    update_display,
-                    currency
-                ), tags=(str(asset["id"]),) + cmp_tag)
+                    r["name"],
+                    pct_str,
+                    r["coupon_display"],
+                    r["display_type"],
+                    r["list_level_display"],
+                    r["quantity"],
+                    r["lot_display"],
+                    r["avg_price_str"],
+                    r["price_str"],
+                    r["total_str"],
+                    r["purchase_date"],
+                    r["update_display"],
+                    r["currency"]
+                ), tags=(str(r["id"]),) + r["cmp_tag"])
 
         self.status_var.set(f"Всего активов: {len(assets)}")
         apply_zebra(self.tree)
