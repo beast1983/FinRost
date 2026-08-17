@@ -8,7 +8,7 @@ import ttkbootstrap as tb
 
 from database import (
     get_connection, get_all_assets, update_asset_price, save_snapshot,
-    get_latest_snapshot_month, _MONTH_NAMES,
+    get_latest_snapshot_month, _MONTH_NAMES, upsert_rate_history,
 )
 from api_client import fetch_cbr_exchange_rates, fetch_price, is_connected
 
@@ -72,6 +72,13 @@ def _refresh_rates():
             """, (key, val, today, val, today))
     conn.commit()
     conn.close()
+    # Точка истории за текущий месяц (перезапись точки того же месяца)
+    for cur in ("USD", "EUR", "CNY"):
+        if cur in rates:
+            try:
+                upsert_rate_history(cur, rates[cur])
+            except Exception:
+                pass
     return True
 
 

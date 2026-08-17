@@ -191,11 +191,16 @@ class TransactionsView(tb.Frame):
         except (ValueError, TypeError):
             amount_val = 0.0
 
-        if not messagebox.askyesno(
-            "Подтверждение",
-            f"Удалить транзакцию?\n{tx_type_display} • {tx_date} • {amount_str} • {account_name}\n\n"
-            f"Баланс счёта будет скорректирован."
-        ):
+        tx_type_db = _TYPE_TO_DB.get(tx_type_display)
+        question = (f"Удалить транзакцию?\n"
+                    f"{tx_type_display} • {tx_date} • {amount_str} • {account_name}\n\n")
+        if tx_type_db in ('покупка', 'продажа'):
+            question += ("Баланс счёта и позиция во вкладке «Активы» будут скорректированы.\n"
+                         "Покупки и продажи можно удалять только за текущий месяц.")
+        else:
+            question += "Баланс счёта будет скорректирован."
+
+        if not messagebox.askyesno("Подтверждение", question):
             return
 
         ok, message = delete_transaction(tx_id)

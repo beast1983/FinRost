@@ -2,7 +2,7 @@ import sqlite3
 from database import get_connection
 
 # Текущая версия схемы базы данных
-CURRENT_DB_VERSION = 3
+CURRENT_DB_VERSION = 4
 
 
 def init_schema():
@@ -258,6 +258,17 @@ def _create_all_tables(cursor):
         )
     """)
 
+    # ─── 9. История курсов валют (1 запись на валюту и месяц) ───
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS currency_rate_history (
+            currency TEXT NOT NULL,
+            month TEXT NOT NULL,
+            rate REAL NOT NULL,
+            updated_at TEXT,
+            PRIMARY KEY (currency, month)
+        )
+    """)
+
 
 def _apply_migrations(cursor, current):
     """Применить инкрементальные миграции до CURRENT_DB_VERSION.
@@ -310,3 +321,28 @@ def _apply_migrations(cursor, current):
         cursor.execute("UPDATE db_version SET version = 3")
         current = 3
         print("[init_schema] Применена миграция до версии 3")
+
+    if current < 4:
+        # Таблица истории курсов валют уже создана в _create_all_tables.
+        # Сидирование: перенести текущие курсы из settings как точку текущего месяца.
+        try:
+            cursor.execute("""
+                INSERT OR IGNORE INTO currency_rate_history (currency, month, rate, updated_at)
+                SELECT 'USD', strftime('%Y-%m', 'now'), CAST(setting_value AS REAL), strftime('%Y-%m-%d', 'now')
+                FROM settings WHERE setting_key = 'usd_rub_rate'
+            """)
+            cursor.execute("""
+                INSERT OR IGNORE INTO currency_rate_history (currency, month, rate, updated_at)
+                SELECT 'EUR', strftime('%Y-%m', 'now'), CAST(setting_value AS REAL), strftime('%Y-%m-%d', 'now')
+                FROM settings WHERE setting_key = 'eur_rub_rate'
+            """)
+            cursor.execute("""
+                INSERT OR IGNORE INTO currency_rate_history (currency, month, rate, updated_at)
+                SELECT 'CNY', strftime('%Y-%m', 'now'), CAST(setting_value AS REAL), strftime('%Y-%m-%d', 'now')
+                FROM settings WHERE setting_key = 'cny_rub_rate'
+            """)
+        except sqlite3.OperationalError:
+            pass
+        cursor.execute("UPDATE db_version SET version = 4")
+        current = 4
+        print("[init_schema] Применена миграция до версии 4")

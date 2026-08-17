@@ -1,6 +1,10 @@
 import tkinter as tk
 import ttkbootstrap as tb
 from tkinter import messagebox, filedialog
+import matplotlib
+matplotlib.use('TkAgg')
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from database import (
     get_all_assets, get_connection, get_all_accounts,
     get_exchange_rates, calculate_total_in_rubles,
@@ -10,10 +14,18 @@ from database import (
     update_ticker_from_moex, convert_placeholder_tickers,
     get_db_path, backup_database,
     get_drawdown_limit, set_drawdown_limit,
+    upsert_rate_history, get_rate_history, get_rate_history_years,
     _write_lock,
 )
 from api_client import fetch_cbr_exchange_rates, fetch_ticker_static
 from datetime import datetime
+
+RATE_HISTORY_CURRENCIES = ('USD', 'EUR', 'CNY')
+
+MONTHS_RU = [
+    'Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн',
+    'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек',
+]
 
 
 def _bind_entry_context_menu(widget):
@@ -206,6 +218,126 @@ class CurrenciesSettingsTab(tb.Frame):
             command=self._save_all_rates, bootstyle="success"
         ).pack(side=tk.LEFT, padx=10)
 
+        # ─── История курсов (график) ───
+        self._create_rate_chart()
+
+    def _create_rate_chart(self):
+        """Панель «История курсов»: фильтры + линейный график по месяцам."""
+        chart_frame = tb.LabelFrame(self, text="История курсов", padx=10, pady=10)
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        filter_frame = tb.Frame(chart_frame)
+        filter_frame.pack(fill=tk.X, pady=(0, 5))
+
+        tb.Label(filter_frame, text="Валюта:").pack(side=tk.LEFT, padx=(0, 4))
+        self.rate_currency_var = tk.StringVar(value="USD")
+        self.rate_currency_combo = tb.Combobox(
+            filter_frame, textvariable=self.rate_currency_var,
+            values=list(RATE_HISTORY_CURRENCIES) + ["Все"],
+            state="readonly", width=8, justify=tk.CENTER,
+        )
+        self.rate_currency_combo.pack(side=tk.LEFT, padx=(0, 15))
+        self.rate_currency_combo.bind('<<ComboboxSelected>>', lambda e: self._refresh_rate_chart())
+
+        tb.Label(filter_frame, text="Год:").pack(side=tk.LEFT, padx=(0, 4))
+        self.rate_year_from_combo = tb.Combobox(
+            filter_frame, state="readonly", width=8, justify=tk.CENTER,
+        )
+        self.rate_year_from_combo.pack(side=tk.LEFT, padx=(0, 2))
+        tb.Label(filter_frame, text="—").pack(side=tk.LEFT, padx=2)
+        self.rate_year_to_combo = tb.Combobox(
+            filter_frame, state="readonly", width=8, justify=tk.CENTER,
+        )
+        self.rate_year_to_combo.pack(side=tk.LEFT, padx=(2, 0))
+        self.rate_year_from_combo.bind('<<ComboboxSelected>>', lambda e: self._refresh_rate_chart())
+        self.rate_year_to_combo.bind('<<ComboboxSelected>>', lambda e: self._refresh_rate_chart())
+
+        self.rate_figure = Figure(figsize=(8, 3))
+        self.rate_ax = self.rate_figure.add_subplot(111)
+        self.rate_canvas = FigureCanvasTkAgg(self.rate_figure, master=chart_frame)
+        self.rate_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self._populate_rate_chart_years()
+        self._refresh_rate_chart()
+
+    def _populate_rate_chart_years(self):
+        """Заполнить комбобоксы годов из истории курсов."""
+        years = get_rate_history_years()
+        if not years:
+            years = [str(datetime.now().year)]
+        self.rate_year_from_combo['values'] = years
+        self.rate_year_to_combo['values'] = years
+        self.rate_year_from_combo.set(years[-1])
+        self.rate_year_to_combo.set(years[0])
+
+    def _refresh_rate_chart(self):
+        """Перерисовать график истории курсов по фильтрам."""
+        currency = self.rate_currency_var.get()
+        year_from = self.rate_year_from_combo.get()
+        year_to = self.rate_year_to_combo.get()
+
+        if not year_from or not year_to:
+            return
+        if int(year_from) > int(year_to):
+            messagebox.showwarning("Неверный период", "Год «С» не может быть больше года «По»")
+            return
+
+        currencies = RATE_HISTORY_CURRENCIES if currency == "Все" else (currency,)
+        series = {}
+        for cur in currencies:
+            series[cur] = get_rate_history(cur, year_from, year_to)
+
+        self.rate_ax.clear()
+
+        has_data = any(series.values())
+        if not has_data:
+            self.rate_ax.set_title("Нет данных — история начнёт накапливаться после обновления курсов")
+            self.rate_ax.set_xticks([])
+            self.rate_ax.set_yticks([])
+            self.rate_figure.tight_layout()
+            self.rate_canvas.draw()
+            return
+
+        all_months = sorted({m for pts in series.values() for m, _ in pts})
+        x_index = {m: i for i, m in enumerate(all_months)}
+
+        for cur in currencies:
+            pts = series.get(cur) or []
+            if not pts:
+                continue
+            xs = [x_index[m] for m, _ in pts]
+            ys = [r for _, r in pts]
+            self.rate_ax.plot(xs, ys, marker='o', linewidth=1.8, markersize=4, label=cur)
+
+        labels = []
+        for m in all_months:
+            month_num = int(m.split('-')[1])
+            labels.append(f"{MONTHS_RU[month_num - 1]} {m[2:4]}")
+        self.rate_ax.set_xticks(range(len(labels)))
+        self.rate_ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+        self.rate_ax.set_ylabel("₽ за единицу")
+        self.rate_ax.grid(True, alpha=0.3)
+        title_currency = "USD / EUR / CNY" if currency == "Все" else currency
+        if year_from == year_to:
+            self.rate_ax.set_title(f"Курс {title_currency} — {year_from} г.", fontsize=12)
+        else:
+            self.rate_ax.set_title(f"Курс {title_currency} — {year_from}–{year_to} г.", fontsize=12)
+        if currency == "Все":
+            self.rate_ax.legend(fontsize=9)
+        self.rate_figure.tight_layout()
+        self.rate_canvas.draw()
+
+    def _record_rate_history(self, rates):
+        """Записать точки истории за текущий месяц и перерисовать график."""
+        for cur, rate in rates.items():
+            if cur in RATE_HISTORY_CURRENCIES:
+                try:
+                    upsert_rate_history(cur, rate)
+                except Exception:
+                    pass
+        self._populate_rate_chart_years()
+        self._refresh_rate_chart()
+
     def _load_rates_from_db(self):
         try:
             conn = get_connection()
@@ -393,6 +525,10 @@ class CurrenciesSettingsTab(tb.Frame):
             finally:
                 conn.close()
 
+        # Вне _write_lock: точка истории за текущий месяц + перерисовка графика
+        if updated:
+            self._record_rate_history(rates)
+
     def _save_all_rates(self):
         """Сохранение всех курсов (ручной ввод)."""
         mapping = [
@@ -450,6 +586,10 @@ class CurrenciesSettingsTab(tb.Frame):
         # приводило к двум незакоммиченным write-транзакциям и "database is locked".
         set_drawdown_limit(dd_val)
         self.last_update_date_var.set(today)
+
+        # Точка истории за текущий месяц + перерисовка графика
+        self._record_rate_history({currency: rate for _, currency, rate in validated})
+
         messagebox.showinfo("Сохранено", "Курсы сохранены:\n" + "\n".join(saved))
 
     def _save_usd_rate(self):
@@ -483,6 +623,7 @@ class CurrenciesSettingsTab(tb.Frame):
             return
 
         today = datetime.now().strftime("%Y-%m-%d")
+        saved = False
         with _write_lock:
             conn = get_connection()
             cursor = conn.cursor()
@@ -495,12 +636,16 @@ class CurrenciesSettingsTab(tb.Frame):
                 """, (setting_key, str(rate), today, str(rate), today))
                 conn.commit()
                 self.last_update_date_var.set(today)
+                saved = True
                 messagebox.showinfo("Успех", f"Курс {currency_name} сохранён: {rate} ₽ за 1 {currency_name}")
             except Exception as e:
                 conn.rollback()
                 messagebox.showerror("Ошибка", f"Не удалось сохранить курс: {e}")
             finally:
                 conn.close()
+
+        if saved:
+            self._record_rate_history({currency_name: rate})
 
 
 class StorageSettingsTab(tb.Frame):
@@ -515,8 +660,65 @@ class StorageSettingsTab(tb.Frame):
         self._populate_years()
 
     def _create_ui(self):
+        """Каркас вкладки: область с вертикальной прокруткой + панели."""
+        self._canvas = tk.Canvas(self, highlightthickness=0)
+        try:
+            self._canvas.configure(background=tb.Style().colors.bg)
+        except Exception:
+            pass
+        self._vsb = tb.Scrollbar(self, orient=tk.VERTICAL, command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vsb.set)
+
+        self.scroll_body = tb.Frame(self._canvas)
+        self._canvas_window = self._canvas.create_window(
+            (0, 0), window=self.scroll_body, anchor='nw'
+        )
+
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.scroll_body.bind('<Configure>', self._on_body_configure)
+        self._canvas.bind('<Configure>', self._on_canvas_configure)
+        self.bind_all('<MouseWheel>', self._on_mousewheel)
+
+        self._create_panels()
+
+    def destroy(self):
+        try:
+            self.unbind_all('<MouseWheel>')
+        except tk.TclError:
+            pass
+        super().destroy()
+
+    def _on_body_configure(self, _event):
+        """Обновить scrollregion и показать/скрыть скроллбар по размеру контента."""
+        self._canvas.configure(scrollregion=self._canvas.bbox('all'))
+        bbox = self._canvas.bbox('all')
+        if bbox and bbox[3] > self._canvas.winfo_height():
+            self._vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        else:
+            self._vsb.pack_forget()
+
+    def _on_canvas_configure(self, event):
+        """Растянуть контент на ширину canvas (без горизонтальной прокрутки)."""
+        self._canvas.itemconfigure(self._canvas_window, width=event.width)
+
+    def _on_mousewheel(self, event):
+        """Прокрутка, только если указатель над вкладкой и есть что прокручивать."""
+        if not self.winfo_exists() or not self._canvas.winfo_exists():
+            return
+        if self._canvas.yview() == (0.0, 1.0):
+            return
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        while widget is not None:
+            if widget is self._canvas or widget is self.scroll_body:
+                self._canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+                return
+            widget = widget.master
+
+    def _create_panels(self):
         # ─── Импорт ───
-        import_frame = tb.LabelFrame(self, text="Импорт", padx=10, pady=10)
+        import_frame = tb.LabelFrame(self.scroll_body, text="Импорт", padx=10, pady=10)
         import_frame.pack(fill=tk.X, padx=5, pady=5)
 
         # --- Стоимость активов ---
@@ -573,38 +775,34 @@ class StorageSettingsTab(tb.Frame):
         tb.Entry(income_frame, textvariable=self.income_file_var, width=30).grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
         tb.Button(income_frame, text="Обзор", command=self._browse_income_file).grid(row=row, column=2, padx=5, pady=5)
 
-        # ─── Сопоставление тикеров ───
-        match_frame = tb.LabelFrame(self, text="Сопоставление тикеров", padx=10, pady=10)
-        match_frame.pack(fill=tk.X, padx=5, pady=5)
+        # ─── Импорт заявок QUIK ───
+        quik_frame = tb.LabelFrame(self.scroll_body, text="Импорт заявок QUIK", padx=10, pady=10)
+        quik_frame.pack(fill=tk.X, padx=5, pady=5)
 
         tb.Label(
-            match_frame,
+            quik_frame,
             text=(
-                "После импорта CSV строки без тикера получают техническое имя "
-                "(АКТИВ_1, АКТИВ_2 …).\n"
-                "Кнопка сопоставит их с реестром тикеров по названию. "
-                "Нужно только один раз после импорта."
+                "Исполненные заявки из XLSX-экспорта QUIK пишутся в транзакции; "
+                "активы и баланс счёта меняются как при обычных сделках "
+                "(отключается галочкой в окне импорта).\n"
+                "Новые тикеры попадают в реестр (тип — по секции биржи). "
+                "Дата задаётся в окне; повторный импорт дубли не создаёт."
             ),
-            foreground="gray", justify=tk.LEFT
-        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
+            foreground="gray", justify=tk.LEFT, wraplength=520
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
 
+        tb.Label(quik_frame, text="Брокер:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.quik_broker_var = tk.StringVar()
+        self.quik_broker_combo = tb.Combobox(
+            quik_frame, textvariable=self.quik_broker_var, width=20, state="readonly"
+        )
+        self.quik_broker_combo.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
         tb.Button(
-            match_frame, text="🔗 Сопоставить АКТИВ_* с реестром",
-            command=self._convert_placeholder_tickers, bootstyle="primary"
-        ).grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
-
-        # ─── Хранилище (база данных) ───
-        db_frame = tb.LabelFrame(self, text="Хранилище", padx=10, pady=10)
-        db_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        tb.Label(db_frame, text="Путь к базе данных:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-        self.db_path_var = tk.StringVar(value=get_db_path())
-        tb.Entry(db_frame, textvariable=self.db_path_var, width=45, state='readonly').grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
-        tb.Button(db_frame, text="Обзор…", command=self._browse_db, bootstyle="primary").grid(row=0, column=2, padx=5, pady=5)
-        tb.Button(db_frame, text="Сохранить как… (копия)", command=self._backup_db, bootstyle="success").grid(row=1, column=0, columnspan=3, pady=5)
+            quik_frame, text="Выбрать файл…", command=self._import_quik_orders, bootstyle="primary"
+        ).grid(row=1, column=2, padx=5, pady=5)
 
         # ─── Архивация ───
-        arch_frame = tb.LabelFrame(self, text="Архивация", padx=10, pady=10)
+        arch_frame = tb.LabelFrame(self.scroll_body, text="Архивация", padx=10, pady=10)
         arch_frame.pack(fill=tk.X, padx=5, pady=5)
 
         from app_config import get_archive_settings, get_default_archive_folder
@@ -626,6 +824,36 @@ class StorageSettingsTab(tb.Frame):
         row += 1
 
         tb.Button(arch_frame, text="Сохранить", command=self._save_archive_settings, bootstyle="success").grid(row=row, column=0, columnspan=3, pady=5)
+
+        # ─── Хранилище (база данных) ───
+        db_frame = tb.LabelFrame(self.scroll_body, text="Хранилище", padx=10, pady=10)
+        db_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(db_frame, text="Путь к базе данных:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.db_path_var = tk.StringVar(value=get_db_path())
+        tb.Entry(db_frame, textvariable=self.db_path_var, width=45, state='readonly').grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+        tb.Button(db_frame, text="Обзор…", command=self._browse_db, bootstyle="primary").grid(row=0, column=2, padx=5, pady=5)
+        tb.Button(db_frame, text="Сохранить как… (копия)", command=self._backup_db, bootstyle="success").grid(row=1, column=0, columnspan=3, pady=5)
+
+        # ─── Сопоставление тикеров ───
+        match_frame = tb.LabelFrame(self.scroll_body, text="Сопоставление тикеров", padx=10, pady=10)
+        match_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(
+            match_frame,
+            text=(
+                "После импорта CSV строки без тикера получают техническое имя "
+                "(АКТИВ_1, АКТИВ_2 …).\n"
+                "Кнопка сопоставит их с реестром тикеров по названию. "
+                "Нужно только один раз после импорта."
+            ),
+            foreground="gray", justify=tk.LEFT
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
+
+        tb.Button(
+            match_frame, text="🔗 Сопоставить АКТИВ_* с реестром",
+            command=self._convert_placeholder_tickers, bootstyle="primary"
+        ).grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
 
     def _browse_db(self):
         """Выбрать существующую БД."""
@@ -696,6 +924,7 @@ class StorageSettingsTab(tb.Frame):
             self._broker_map[display] = acc['id']
         self.asset_broker_combo['values'] = values
         self.income_broker_combo['values'] = values
+        self.quik_broker_combo['values'] = values
 
     def _populate_years(self):
         """Заполнить комбобоксы года из БД."""
@@ -926,6 +1155,56 @@ class StorageSettingsTab(tb.Frame):
         path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
         if path:
             self.income_file_var.set(path)
+
+    def _import_quik_orders(self):
+        """Импорт заявок QUIK из XLSX в transactions (окно предпросмотра)."""
+        from quik_import import parse_quik_xlsx, QuikImportDialog
+        path = filedialog.askopenfilename(
+            title="Выберите XLSX-экспорт заявок QUIK",
+            filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            orders = parse_quik_xlsx(path)
+        except ValueError as e:
+            messagebox.showerror("Ошибка формата", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("Ошибка чтения файла", f"Не удалось прочитать файл:\n{e}")
+            return
+        if not orders:
+            messagebox.showinfo("Импорт", "В файле не найдено заявок (покупка/продажа).")
+            return
+        accounts = get_all_accounts()
+        if not accounts:
+            messagebox.showwarning("Нет счетов", "Сначала создайте счёт на вкладке «Счета».")
+            return
+
+        default_account_id = self._broker_map.get(self.quik_broker_var.get())
+
+        def on_done(imported, skipped, new_tickers, stats=None):
+            msg = f"Импортировано транзакций: {imported}"
+            if skipped:
+                msg += f"\nПропущено дубликатов: {skipped}"
+            if new_tickers:
+                msg += f"\nНовых тикеров в реестре: {new_tickers}"
+            if stats:
+                if stats.get('created'):
+                    msg += (f"\nНовых позиций: {len(stats['created'])} "
+                            f"({', '.join(dict.fromkeys(stats['created']))})")
+                if stats.get('bought'):
+                    msg += (f"\nДокуплено позиций: {len(stats['bought'])} "
+                            f"({', '.join(dict.fromkeys(stats['bought']))})")
+                if stats.get('sold'):
+                    msg += (f"\nПродано позиций: {len(stats['sold'])} "
+                            f"({', '.join(dict.fromkeys(stats['sold']))})")
+                for w in stats.get('warnings', []):
+                    msg += f"\nВнимание: {w}"
+            messagebox.showinfo("Импорт заявок завершён", msg)
+
+        QuikImportDialog(self, orders, accounts,
+                         default_account_id=default_account_id, on_done=on_done)
 
     def _import_incomes(self):
         """Импорт доходов (купоны, дивиденды) из CSV."""

@@ -776,7 +776,8 @@ def get_all_transactions(account_id=None, tx_type=None, year=None, month=None, l
     cursor = conn.cursor()
     query = f"""
         SELECT t.id, t.date, t.tx_type, t.account_id, a.name as account_name,
-               t.ticker, t.amount, c.code AS currency_code, t.notes, t.created_at, am.name as asset_name
+               t.ticker, t.amount, c.code AS currency_code, t.notes, t.created_at,
+               COALESCE(am.name, tn.name) AS asset_name
         FROM transactions t
         LEFT JOIN accounts a ON t.account_id = a.id
         LEFT JOIN currencies c ON t.currency_id = c.id
@@ -785,6 +786,7 @@ def get_all_transactions(account_id=None, tx_type=None, year=None, month=None, l
             WHERE name IS NOT NULL AND name != ''
             GROUP BY ticker
         ) am ON t.ticker = am.ticker
+        LEFT JOIN ticker_names tn ON UPPER(t.ticker) = tn.ticker
         {where}
         ORDER BY t.date DESC, t.id DESC
         LIMIT ? OFFSET ?
@@ -801,8 +803,120 @@ def get_account_transactions(account_id):
     return get_all_transactions(account_id=account_id)
 
 
+def _delete_asset_row(cursor, asset_id):
+    """Удалить актив, обнулив ссылки на него (аналог remove_asset, без отдельного соединения)."""
+    cursor.execute("UPDATE snapshot_assets SET asset_id = NULL WHERE asset_id = ?", (asset_id,))
+    cursor.execute("UPDATE transactions SET asset_id = NULL WHERE asset_id = ?", (asset_id,))
+    cursor.execute("UPDATE buys SET asset_id = NULL WHERE asset_id = ?", (asset_id,))
+    cursor.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
+
+
+def _revert_buy_position(cursor, account_id, asset_id, ticker, qty, price):
+    """Откатить покупку: убрать запись из buys и уменьшить/удалить позицию.
+
+    Средняя цена оставшейся позиции не пересчитывается.
+    """
+    # 1. Удалить запись о покупке из журнала buys (сначала по asset_id,
+    #    затем — fallback для полностью проданных позиций, где asset_id NULL).
+    matched = False
+    if asset_id:
+        cursor.execute(
+            """DELETE FROM buys WHERE id = (
+                   SELECT id FROM buys
+                   WHERE asset_id = ?
+                     AND ABS(quantity - ?) < 0.000001
+                     AND ABS(price - ?) < 0.000001
+                   ORDER BY id DESC LIMIT 1)""",
+            (asset_id, qty, price))
+        matched = cursor.rowcount > 0
+    if not matched and ticker:
+        cursor.execute(
+            """DELETE FROM buys WHERE id = (
+                   SELECT id FROM buys
+                   WHERE asset_id IS NULL
+                     AND UPPER(ticker) = UPPER(?)
+                     AND ABS(quantity - ?) < 0.000001
+                     AND ABS(price - ?) < 0.000001
+                   ORDER BY id DESC LIMIT 1)""",
+            (ticker, qty, price))
+
+    # 2. Скорректировать позицию: сначала по asset_id из транзакции,
+    #    при его отсутствии (позиция была пересоздана) — по тикеру и счёту.
+    asset = None
+    if asset_id:
+        cursor.execute("SELECT id, quantity FROM assets WHERE id = ?", (asset_id,))
+        asset = cursor.fetchone()
+    if asset is None and ticker:
+        cursor.execute(
+            """SELECT id, quantity FROM assets
+               WHERE UPPER(ticker) = UPPER(?) AND broker_id IS ?
+               ORDER BY id LIMIT 1""",
+            (ticker, account_id))
+        asset = cursor.fetchone()
+
+    if asset:
+        remaining = (asset["quantity"] or 0) - qty
+        if remaining <= 0.000001:
+            _delete_asset_row(cursor, asset["id"])
+        else:
+            cursor.execute("UPDATE assets SET quantity = ? WHERE id = ?",
+                           (remaining, asset["id"]))
+
+
+def _revert_sell_position(cursor, account_id, asset_id, ticker, qty, price,
+                          currency_id, tx_date):
+    """Откатить продажу: вернуть количество в позицию или воссоздать её.
+
+    Позиция воссоздаётся по цене продажи (исходная средняя неизвестна).
+    """
+    asset = None
+    if asset_id:
+        cursor.execute("SELECT id FROM assets WHERE id = ?", (asset_id,))
+        asset = cursor.fetchone()
+    if asset is None and ticker:
+        cursor.execute(
+            """SELECT id FROM assets
+               WHERE UPPER(ticker) = UPPER(?) AND broker_id IS ?
+               ORDER BY id LIMIT 1""",
+            (ticker, account_id))
+        asset = cursor.fetchone()
+
+    if asset:
+        cursor.execute("UPDATE assets SET quantity = quantity + ? WHERE id = ?",
+                       (qty, asset["id"]))
+        return
+
+    if not ticker or qty <= 0:
+        return
+
+    # Воссоздаём позицию по данным транзакции
+    name, asset_type = '', ''
+    lot_size = 1
+    cursor.execute(
+        "SELECT name, asset_type, lot_size FROM ticker_names WHERE ticker = ?",
+        (ticker.upper(),))
+    tn = cursor.fetchone()
+    if tn:
+        name = tn["name"] or ''
+        asset_type = tn["asset_type"] or ''
+        lot_size = tn["lot_size"] if tn["lot_size"] else 1
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("""
+        INSERT INTO assets
+            (ticker, name, asset_type, quantity, avg_price, broker_id,
+             purchase_date, created_at, currency_id, face_value, lot_size,
+             lot_value, list_level)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1000, ?, 1000, NULL)
+    """, (ticker, name, asset_type, qty, price, account_id,
+          tx_date, now, currency_id or 1, lot_size))
+
+
 def delete_transaction(tx_id):
-    """Удалить транзакцию и откатить изменение баланса.
+    """Удалить транзакцию и откатить её влияние на баланс и позиции.
+
+    Покупки/продажи можно удалять только за текущий месяц; при их удалении
+    корректируются баланс счёта и позиция во вкладке «Активы».
 
     Возвращает (ok: bool, message: str).
     """
@@ -810,7 +924,9 @@ def delete_transaction(tx_id):
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT id, tx_type, account_id, amount, date FROM transactions WHERE id = ?",
+            """SELECT id, tx_type, account_id, amount, date, ticker,
+                      currency_id, asset_id, qty, price
+               FROM transactions WHERE id = ?""",
             (tx_id,)
         )
         tx = cursor.fetchone()
@@ -823,10 +939,6 @@ def delete_transaction(tx_id):
         amount = tx["amount"]
         tx_date = tx["date"]
 
-        if tx_type in ('покупка', 'продажа'):
-            conn.close()
-            return False, "Удаление покупок/продаж не поддерживается"
-
         # Откат баланса
         cursor.execute("SELECT balance FROM accounts WHERE id = ?", (account_id,))
         acc = cursor.fetchone()
@@ -834,7 +946,29 @@ def delete_transaction(tx_id):
             conn.close()
             return False, "Счёт не найден"
 
-        if tx_type == 'пополнение':
+        today_ym = datetime.now().strftime("%Y-%m")
+
+        if tx_type in ('покупка', 'продажа'):
+            if tx_date[:7] != today_ym:
+                conn.close()
+                return False, "Покупки/продажи можно удалять только за текущий месяц"
+
+            if tx_type == 'покупка':
+                new_bal = round_price(acc["balance"] + amount)
+            else:
+                new_bal = round_price(acc["balance"] - amount)
+            cursor.execute("UPDATE accounts SET balance = ? WHERE id = ?", (new_bal, account_id))
+
+            qty = tx["qty"] or 0
+            price = tx["price"] or 0
+            ticker = (tx["ticker"] or '').strip()
+
+            if tx_type == 'покупка':
+                _revert_buy_position(cursor, account_id, tx["asset_id"], ticker, qty, price)
+            else:
+                _revert_sell_position(cursor, account_id, tx["asset_id"], ticker,
+                                      qty, price, tx["currency_id"], tx_date)
+        elif tx_type == 'пополнение':
             new_bal = round_price(acc["balance"] - amount)
         elif tx_type == 'списание':
             new_bal = round_price(acc["balance"] + amount)
@@ -844,16 +978,19 @@ def delete_transaction(tx_id):
             conn.close()
             return False, "Неизвестный тип транзакции"
 
-        cursor.execute("UPDATE accounts SET balance = ? WHERE id = ?", (new_bal, account_id))
+        if tx_type not in ('покупка', 'продажа'):
+            cursor.execute("UPDATE accounts SET balance = ? WHERE id = ?", (new_bal, account_id))
         cursor.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
         conn.commit()
 
-        message = f"Транзакция удалена. Баланс скорректирован."
+        if tx_type in ('покупка', 'продажа'):
+            message = "Транзакция удалена. Баланс и позиция во вкладке «Активы» скорректированы."
+        else:
+            message = "Транзакция удалена. Баланс скорректирован."
         if new_bal < 0:
             message += f" ВНИМАНИЕ: баланс стал отрицательным ({new_bal:.2f})."
 
         # Обновить текущий срез, если транзакция из текущего месяца
-        today_ym = datetime.now().strftime("%Y-%m")
         if tx_date[:7] == today_ym:
             save_snapshot(target_ym=today_ym)
 
@@ -1779,6 +1916,62 @@ def get_exchange_rates():
             pass
     conn.close()
     return rates
+
+
+def upsert_rate_history(currency, rate, when=None):
+    """Записать/перезаписать точку истории курса за текущий месяц.
+
+    Одна запись на пару (валюта, месяц 'YYYY-MM'): повторная запись в том же
+    месяце обновляет её (июль перезаписывает июль, август — август).
+    """
+    month = (when or datetime.now()).strftime("%Y-%m")
+    today = (when or datetime.now()).strftime("%Y-%m-%d")
+    with _write_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO currency_rate_history (currency, month, rate, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(currency, month) DO UPDATE SET rate = ?, updated_at = ?
+            """, (currency, month, rate, today, rate, today))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_rate_history(currency, year_from, year_to):
+    """Точки истории курса валюты за диапазон лет.
+
+    Returns:
+        list[tuple[str, float]] — (месяц 'YYYY-MM', курс), отсортировано по месяцу.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT month, rate FROM currency_rate_history
+        WHERE currency = ? AND substr(month, 1, 4) BETWEEN ? AND ?
+        ORDER BY month ASC
+    """, (currency, str(year_from), str(year_to)))
+    rows = [(r["month"], r["rate"]) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_rate_history_years():
+    """Годы, за которые есть история курсов + текущий год, по убыванию."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT DISTINCT substr(month, 1, 4) as y FROM currency_rate_history
+        ORDER BY y DESC
+    """)
+    rows = [r["y"] for r in cursor.fetchall()]
+    conn.close()
+    current = str(datetime.now().year)
+    if current not in rows:
+        rows.insert(0, current)
+    return rows
 
 
 def calculate_total_in_rubles(quantity, avg_price, currency_id, rates, asset_type="акция", face_value=1000, lot_size=1):

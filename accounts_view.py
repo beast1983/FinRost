@@ -39,6 +39,28 @@ def _bind_entry_context_menu(widget):
     widget.bind("<Button-3>", show_menu)
 
 
+def _bind_comma_to_dot(entry):
+    """Заменить запятую на точку при вводе и при вставке из буфера в числовых полях."""
+    def on_comma(_event):
+        entry.insert(tk.INSERT, '.')
+        return 'break'
+    entry.bind('<Key-comma>', on_comma)
+    def _fix_on_insert(_event=None):
+        try:
+            val = entry.get()
+            if ',' in val:
+                entry.delete(0, tk.END)
+                entry.insert(0, val.replace(',', '.'))
+        except Exception:
+            pass
+    entry.bind('<KeyRelease>', _fix_on_insert)
+
+
+def _parse_amount(value):
+    """Строка -> float с поддержкой запятой как разделителя."""
+    return float(str(value).strip().replace(',', '.'))
+
+
 def _format_currency(value, currency):
     """Форматировать значение с валютой."""
     symbols = {'RUB': '₽', 'USD': '$', 'EUR': '€', 'CNY': '¥'}
@@ -205,6 +227,7 @@ class AccountsView(tb.Frame):
         balance_entry = tb.Entry(dialog, textvariable=balance_var)
         balance_entry.grid(row=row, column=1, padx=10, pady=5)
         _bind_entry_context_menu(balance_entry)
+        _bind_comma_to_dot(balance_entry)
         row += 1
 
         def on_save():
@@ -213,7 +236,7 @@ class AccountsView(tb.Frame):
                 messagebox.showerror("Ошибка", "Введите название счёта")
                 return
             try:
-                balance = float(balance_var.get())
+                balance = _parse_amount(balance_var.get())
             except ValueError:
                 messagebox.showerror("Ошибка", "Некорректный баланс")
                 return
@@ -291,6 +314,7 @@ class AccountsView(tb.Frame):
         balance_entry = tb.Entry(dialog, textvariable=balance_var)
         balance_entry.grid(row=row, column=1, padx=10, pady=5)
         _bind_entry_context_menu(balance_entry)
+        _bind_comma_to_dot(balance_entry)
         row += 1
 
         tb.Label(dialog, text="Активен").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
@@ -307,7 +331,7 @@ class AccountsView(tb.Frame):
                 messagebox.showerror("Ошибка", "Введите название счёта")
                 return
             try:
-                balance = float(balance_var.get())
+                balance = _parse_amount(balance_var.get())
             except ValueError:
                 messagebox.showerror("Ошибка", "Некорректный баланс")
                 return
@@ -392,6 +416,7 @@ class AccountsView(tb.Frame):
         amount_entry = tb.Entry(dialog, textvariable=amount_var)
         amount_entry.pack(pady=5)
         _bind_entry_context_menu(amount_entry)
+        _bind_comma_to_dot(amount_entry)
 
         tb.Label(dialog, text="Дата").pack(pady=5)
         date_entry = create_date_entry(dialog, initial_date=datetime.now().date(), width=28)
@@ -405,7 +430,7 @@ class AccountsView(tb.Frame):
 
         def on_save():
             try:
-                amount = float(amount_var.get())
+                amount = _parse_amount(amount_var.get())
                 if amount <= 0:
                     messagebox.showerror("Ошибка", "Сумма должна быть больше 0")
                     return
@@ -451,6 +476,7 @@ class AccountsView(tb.Frame):
         amount_entry = tb.Entry(dialog, textvariable=amount_var)
         amount_entry.pack(pady=5)
         _bind_entry_context_menu(amount_entry)
+        _bind_comma_to_dot(amount_entry)
 
         tb.Label(dialog, text="Дата").pack(pady=5)
         date_entry = create_date_entry(dialog, initial_date=datetime.now().date(), width=28)
@@ -464,7 +490,7 @@ class AccountsView(tb.Frame):
 
         def on_save():
             try:
-                amount = float(amount_var.get())
+                amount = _parse_amount(amount_var.get())
                 if amount <= 0:
                     messagebox.showerror("Ошибка", "Сумма должна быть больше 0")
                     return
