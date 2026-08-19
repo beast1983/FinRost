@@ -1,7 +1,9 @@
 """Импорт заявок QUIK из XLSX-экспорта.
 
 XLSX читается стандартной библиотекой (zipfile + ElementTree), без pandas
-и openpyxl. Исполненные заявки записываются в transactions; в режиме
+и openpyxl. Исполненные заявки записываются в transactions; частично
+исполненные (снятые с «Исполнено» > 0) импортируются по фактически
+исполненному количеству с пропорциональной суммой. В режиме
 update_portfolio дополнительно создаются/обновляются активы и меняется
 баланс счёта (как при обычной покупке/продаже в приложении).
 
@@ -49,6 +51,7 @@ _COLUMN_ALIASES = {
     'operation': ('операция',),
     'price': ('цена',),
     'qty': ('кол-во', 'количество'),
+    'filled': ('исполнено',),
     'volume': ('объем', 'объём', 'сумма'),
     'currency': ('валюта',),
     'status': ('состояние',),
@@ -105,8 +108,8 @@ def parse_quik_xlsx(filepath):
 
     Возвращает список dict с ключами:
         number, isin, name, operation ('покупка'/'продажа'),
-        price, qty, volume, currency (код приложения, напр. RUB),
-        status, time.
+        price, qty, filled (исполнено, None если столбца нет),
+        volume, currency (код приложения, напр. RUB), status, time.
 
     Бросает ValueError с понятным сообщением, если файл не похож
     на экспорт заявок QUIK.
@@ -221,6 +224,8 @@ def parse_quik_xlsx(filepath):
             'operation': operation,
             'price': _parse_quik_number(cell(parts, 'price')),
             'qty': _parse_quik_number(cell(parts, 'qty')),
+            'filled': (_parse_quik_number(cell(parts, 'filled'))
+                       if 'filled' in col_map else None),
             'volume': _parse_quik_number(cell(parts, 'volume')),
             'currency': currency,
             'status': cell(parts, 'status').strip(),
@@ -323,9 +328,24 @@ def import_orders_as_transactions(orders, account_id, tx_date, type_map=None,
                             (o['name'], ticker_u),
                         )
 
+                # Частично исполненная заявка («Снята», но «Исполнено» > 0):
+                # берём исполненное количество и пропорциональную сумму —
+                # «Объем» в экспорте указан на всю заявку целиком
+                full_qty = o['qty'] or 0
+                qty = full_qty
+                filled = o.get('filled')
+                if filled is not None and 0 < filled < full_qty:
+                    qty = filled
+
                 amount = o['volume']
                 if amount is None:
-                    amount = (o['price'] or 0) * (o['qty'] or 0)
+                    amount = (o['price'] or 0) * qty
+                elif qty != full_qty and full_qty > 0:
+                    amount = amount * qty / full_qty
+
+                notes = f"QUIK №{o['number']} {o['time']}"
+                if qty != full_qty:
+                    notes += f" · исполнено {qty:g} из {full_qty:g}"
 
                 if not update_portfolio:
                     add_transaction_internal(
@@ -335,9 +355,9 @@ def import_orders_as_transactions(orders, account_id, tx_date, type_map=None,
                         amount,
                         get_currency_id(o['currency']),
                         ticker=o['isin'],
-                        notes=f"QUIK №{o['number']} {o['time']}",
+                        notes=notes,
                         tx_date=tx_date,
-                        qty=o['qty'],
+                        qty=qty,
                         price=o['price'],
                         profit=None,
                     )
@@ -367,7 +387,6 @@ def import_orders_as_transactions(orders, account_id, tx_date, type_map=None,
                     asset = cursor.fetchone()
 
                 price = o['price']
-                qty = o['qty'] or 0
                 profit = None
 
                 if o['operation'] == 'покупка':
@@ -452,8 +471,8 @@ def import_orders_as_transactions(orders, account_id, tx_date, type_map=None,
                             unit = fv / 100
                         else:
                             unit = ls
-                        if o['volume'] and qty:
-                            sell_sum = o['volume'] * sold_qty / qty
+                        if amount and qty:
+                            sell_sum = amount * sold_qty / qty
                         else:
                             sell_sum = (price or 0) * sold_qty * unit
                         profit = sell_sum - asset["avg_price"] * sold_qty * unit
@@ -504,10 +523,10 @@ def import_orders_as_transactions(orders, account_id, tx_date, type_map=None,
                     amount_acc,
                     acc_currency_id,
                     ticker=o['isin'],
-                    notes=f"QUIK №{o['number']} {o['time']}",
+                    notes=notes,
                     tx_date=tx_date,
                     asset_id=asset_id,
-                    qty=o['qty'],
+                    qty=qty,
                     price=o['price'],
                     profit=profit,
                 )
@@ -683,16 +702,17 @@ class QuikImportDialog(tb.Toplevel):
 
         # Таблица заявок
         columns = ('mark', 'number', 'isin', 'name', 'operation',
-                   'price', 'qty', 'volume', 'time', 'status')
+                   'price', 'qty', 'filled', 'volume', 'time', 'status')
         headers = ('', 'Номер', 'Код', 'Инструмент', 'Операция',
-                   'Цена', 'Кол-во', 'Объём', 'Время', 'Состояние')
-        widths = (36, 130, 120, 200, 80, 70, 65, 90, 70, 90)
+                   'Цена', 'Кол-во', 'Исполнено', 'Объём', 'Время',
+                   'Состояние')
+        widths = (36, 130, 120, 200, 80, 70, 65, 90, 90, 70, 90)
         from table_utils import apply_zebra
         self.tree = tb.Treeview(self, columns=columns, show='headings',
                                 height=min(14, max(6, len(self.orders))),
                                 selectmode='none')
         for col, head, width in zip(columns, headers, widths):
-            anchor = tk.E if col in ('price', 'qty', 'volume') else tk.W
+            anchor = tk.E if col in ('price', 'qty', 'filled', 'volume') else tk.W
             self.tree.heading(col, text=head)
             self.tree.column(col, width=width, anchor=anchor,
                              stretch=(col == 'name'))
@@ -705,8 +725,7 @@ class QuikImportDialog(tb.Toplevel):
 
         for i, o in enumerate(self.orders):
             is_dup = o['number'] in self._imported_numbers
-            default_on = (not is_dup and
-                          o['status'].strip().lower() == _EXECUTE_STATUS)
+            default_on = (not is_dup and self._is_executed(o))
             self._checked[str(i)] = default_on
             self.tree.insert('', tk.END, iid=str(i), tags=('dup',) if is_dup else (), values=(
                 self._CHECKED if default_on else self._UNCHECKED,
@@ -716,6 +735,7 @@ class QuikImportDialog(tb.Toplevel):
                 'Покупка' if o['operation'] == 'покупка' else 'Продажа',
                 f"{o['price']:.2f}" if o['price'] is not None else '',
                 f"{o['qty']:g}" if o['qty'] is not None else '',
+                f"{o['filled']:g}" if o.get('filled') is not None else '',
                 f"{o['volume']:.2f}" if o['volume'] is not None else '',
                 o['time'],
                 o['status'] + (' · уже импортирована' if is_dup else ''),
@@ -765,11 +785,20 @@ class QuikImportDialog(tb.Toplevel):
             iid = str(i)
             if 'dup' in self.tree.item(iid, 'tags'):
                 continue
-            on = o['status'].strip().lower() == _EXECUTE_STATUS
+            on = self._is_executed(o)
             self._checked[iid] = on
             values = list(self.tree.item(iid, 'values'))
             values[0] = self._CHECKED if on else self._UNCHECKED
             self.tree.item(iid, values=values)
+
+    @staticmethod
+    def _is_executed(o):
+        """Заявка к импорту по умолчанию: «Исполнена» или есть исполненное
+        количество (частично исполненная снятая заявка)."""
+        if o['status'].strip().lower() == _EXECUTE_STATUS:
+            return True
+        filled = o.get('filled')
+        return filled is not None and filled > 0
 
     # ─── Импорт ────────────────────────────────────────────────────
 

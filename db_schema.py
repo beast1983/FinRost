@@ -140,10 +140,16 @@ def _create_all_tables(cursor):
     """)
 
     # ─── 0b. Реестр тикеров ───
+    # Колонки asset_type/lot_size/currency соответствуют состоянию после
+    # миграции до версии 3 — на свежей базе они должны быть сразу
+    # (существующие БД не затрагиваются: CREATE IF NOT EXISTS)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS ticker_names (
             ticker TEXT PRIMARY KEY,
-            name TEXT NOT NULL DEFAULT ''
+            name TEXT NOT NULL DEFAULT '',
+            asset_type TEXT NOT NULL DEFAULT '',
+            lot_size INTEGER NOT NULL DEFAULT 1,
+            currency TEXT NOT NULL DEFAULT ''
         )
     """)
     # Миграция: заполнить из существующих активов
