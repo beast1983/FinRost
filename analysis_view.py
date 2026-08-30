@@ -446,15 +446,18 @@ class IncomeTab(tb.Frame):
             coupons.append(monthly[m]['купон'])
             dividends.append(monthly[m]['дивиденд'])
 
+        total_income_rub = sum(m['купон'] + m['дивиденд'] for m in monthly.values())
+
         # ── График (stacked bar) ──
         self.ax.clear()
         self._create_tooltip()
         self._bar_rects = []
         self._hover_bars = []
+        total_str = f"{total_income_rub:,.2f}".replace(",", " ")
         if year_from == year_to:
-            chart_title = f"Доходы — {year_from} г."
+            chart_title = f"Доходы — {year_from} г. (итого: {total_str} ₽)"
         else:
-            chart_title = f"Доходы — {year_from}–{year_to} г."
+            chart_title = f"Доходы — {year_from}–{year_to} г. (итого: {total_str} ₽)"
         self.ax.set_title(chart_title, fontsize=12)
 
         x = list(range(len(month_names)))
