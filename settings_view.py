@@ -107,7 +107,7 @@ def _is_header_row(parts):
 
 
 class SettingsView(tb.Frame):
-    """Окно настроек с вкладками: Валюты, Хранилище, Тикеры."""
+    """Окно настроек с вкладками: Основные, Валюты, Хранилище, Тикеры."""
 
     def __init__(self, parent, controller=None):
         super().__init__(parent)
@@ -119,17 +119,164 @@ class SettingsView(tb.Frame):
         self.notebook = tb.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # 1) Валюты
+        # 1) Основные
+        self.general_tab = GeneralSettingsTab(self.notebook, self)
+        self.notebook.add(self.general_tab, text="Основные")
+
+        # 2) Валюты
         self.currencies_tab = CurrenciesSettingsTab(self.notebook, self)
         self.notebook.add(self.currencies_tab, text="Валюты")
 
-        # 2) Хранилище + Импорт + Сопоставление тикеров
+        # 3) Хранилище
         self.storage_tab = StorageSettingsTab(self.notebook, self)
         self.notebook.add(self.storage_tab, text="Хранилище")
 
-        # 3) Тикеры
+        # 4) Тикеры
         self.tickers_tab = TickerRegistryTab(self.notebook)
         self.notebook.add(self.tickers_tab, text="Тикеры")
+
+
+class GeneralSettingsTab(tb.Frame):
+    """Вкладка «Основные»: лимит просадки + импорт QUIK."""
+
+    def __init__(self, parent, settings_view):
+        super().__init__(parent)
+        self.settings_view = settings_view
+        self.drawdown_limit_var = tk.StringVar(value="20.0")
+        self.quik_broker_var = tk.StringVar()
+        self._broker_map = {}
+        self._create_ui()
+        self._load_drawdown_limit()
+        self._populate_brokers()
+
+    def _create_ui(self):
+        # ─── Лимит просадки ───
+        limit_frame = tb.LabelFrame(self, text="Лимит просадки", padx=10, pady=10)
+        limit_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(
+            limit_frame,
+            text="Максимальное падение цены актива от средней цены покупки,\n"
+                 "после которого он помечается как кандидат на продажу.",
+            foreground="gray", justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
+
+        tb.Label(limit_frame, text="Порог, %:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        limit_entry = tb.Entry(limit_frame, textvariable=self.drawdown_limit_var, width=10)
+        limit_entry.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        _bind_entry_context_menu(limit_entry)
+
+        tb.Button(
+            limit_frame, text="Сохранить",
+            command=self._save_drawdown_limit, bootstyle="success",
+        ).grid(row=2, column=0, columnspan=2, pady=5)
+
+        # ─── Импорт заявок QUIK ───
+        quik_frame = tb.LabelFrame(self, text="Импорт заявок QUIK", padx=10, pady=10)
+        quik_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(
+            quik_frame,
+            text=(
+                "Исполненные и частично исполненные заявки из XLSX-экспорта "
+                "QUIK пишутся в транзакции (для частичных — по колонке "
+                "«Исполнено»); активы и баланс счёта меняются как при "
+                "обычных сделках (отключается галочкой в окне импорта).\n"
+                "Новые тикеры попадают в реестр (тип — по секции биржи). "
+                "Дата задаётся в окне; повторный импорт дубли не создаёт."
+            ),
+            foreground="gray", justify=tk.LEFT, wraplength=520
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
+
+        tb.Label(quik_frame, text="Брокер:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.quik_broker_combo = tb.Combobox(
+            quik_frame, textvariable=self.quik_broker_var, width=20, state="readonly"
+        )
+        self.quik_broker_combo.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        tb.Button(
+            quik_frame, text="Выбрать файл…", command=self._import_quik_orders, bootstyle="primary"
+        ).grid(row=1, column=2, padx=5, pady=5)
+
+    def _load_drawdown_limit(self):
+        try:
+            val = get_drawdown_limit()
+            if val is not None:
+                self.drawdown_limit_var.set(str(val))
+        except Exception:
+            pass
+
+    def _save_drawdown_limit(self):
+        try:
+            dd_val = float(self.drawdown_limit_var.get())
+            if not (0 <= dd_val <= 100):
+                messagebox.showerror("Ошибка", "Лимит просадки должен быть от 0 до 100")
+                return
+        except ValueError:
+            messagebox.showerror("Ошибка", "Введите корректный лимит просадки")
+            return
+        set_drawdown_limit(dd_val)
+        messagebox.showinfo("Сохранено", "Лимит просадки сохранён.")
+
+    def _populate_brokers(self):
+        self._broker_map = {}
+        accounts = get_all_accounts()
+        values = []
+        for acc in accounts:
+            display = acc['name']
+            if acc['account_number']:
+                display += f" · {acc['account_number']}"
+            values.append(display)
+            self._broker_map[display] = acc['id']
+        self.quik_broker_combo['values'] = values
+
+    def _import_quik_orders(self):
+        from quik_import import parse_quik_xlsx, QuikImportDialog
+        path = filedialog.askopenfilename(
+            title="Выберите XLSX-экспорт заявок QUIK",
+            filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            orders = parse_quik_xlsx(path)
+        except ValueError as e:
+            messagebox.showerror("Ошибка формата", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("Ошибка чтения файла", f"Не удалось прочитать файл:\n{e}")
+            return
+        if not orders:
+            messagebox.showinfo("Импорт", "В файле не найдено заявок (покупка/продажа).")
+            return
+        accounts = get_all_accounts()
+        if not accounts:
+            messagebox.showwarning("Нет счетов", "Сначала создайте счёт на вкладке «Счета».")
+            return
+
+        default_account_id = self._broker_map.get(self.quik_broker_var.get())
+
+        def on_done(imported, skipped, new_tickers, stats=None):
+            msg = f"Импортировано транзакций: {imported}"
+            if skipped:
+                msg += f"\nПропущено дубликатов: {skipped}"
+            if new_tickers:
+                msg += f"\nНовых тикеров в реестре: {new_tickers}"
+            if stats:
+                if stats.get('created'):
+                    msg += (f"\nНовых позиций: {len(stats['created'])} "
+                            f"({', '.join(dict.fromkeys(stats['created']))})")
+                if stats.get('bought'):
+                    msg += (f"\nДокупено позиций: {len(stats['bought'])} "
+                            f"({', '.join(dict.fromkeys(stats['bought']))})")
+                if stats.get('sold'):
+                    msg += (f"\nПродано позиций: {len(stats['sold'])} "
+                            f"({', '.join(dict.fromkeys(stats['sold']))})")
+                for w in stats.get('warnings', []):
+                    msg += f"\nВнимание: {w}"
+            messagebox.showinfo("Импорт заявок завершён", msg)
+
+        QuikImportDialog(self, orders, accounts,
+                         default_account_id=default_account_id, on_done=on_done)
 
 
 class CurrenciesSettingsTab(tb.Frame):
@@ -153,7 +300,6 @@ class CurrenciesSettingsTab(tb.Frame):
         }
         self.last_update_date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         self._usd_status_var = tk.StringVar(value="")
-        self.drawdown_limit_var = tk.StringVar(value="20.0")
 
         self._create_ui()
         self._load_rates_from_db()
@@ -189,22 +335,6 @@ class CurrenciesSettingsTab(tb.Frame):
         tb.Label(date_frame, text="Дата обновления:").pack(side=tk.LEFT)
         tb.Label(date_frame, textvariable=self.last_update_date_var).pack(side=tk.LEFT, padx=5)
         tb.Label(date_frame, textvariable=self._usd_status_var, foreground="gray").pack(side=tk.LEFT)
-
-        # ─── Лимит просадки ───
-        limit_frame = tb.LabelFrame(self, text="Лимит просадки", padx=10, pady=10)
-        limit_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        tb.Label(
-            limit_frame,
-            text="Максимальное падение цены актива от средней цены покупки,\n"
-                 "после которого он помечается как кандидат на продажу.",
-            foreground="gray", justify=tk.LEFT,
-        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
-
-        tb.Label(limit_frame, text="Порог, %:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        limit_entry = tb.Entry(limit_frame, textvariable=self.drawdown_limit_var, width=10)
-        limit_entry.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
-        _bind_entry_context_menu(limit_entry)
 
         # Общие кнопки
         btn_frame = tb.Frame(self)
@@ -363,11 +493,6 @@ class CurrenciesSettingsTab(tb.Frame):
                 self.cny_rub_rate_var.set(str(row["setting_value"]))
 
             self._usd_status_var.set("")
-            # Лимит просадки
-            cursor.execute("SELECT setting_value FROM settings WHERE setting_key = 'drawdown_limit_pct'")
-            row = cursor.fetchone()
-            if row:
-                self.drawdown_limit_var.set(str(row["setting_value"]))
             conn.close()
         except Exception:
             pass
@@ -550,16 +675,6 @@ class CurrenciesSettingsTab(tb.Frame):
                 return
             validated.append((key, currency, rate))
 
-        # Лимит просадки — тоже валидируем заранее
-        try:
-            dd_val = float(self.drawdown_limit_var.get())
-            if not (0 <= dd_val <= 100):
-                messagebox.showerror("Ошибка", "Лимит просадки должен быть от 0 до 100")
-                return
-        except ValueError:
-            messagebox.showerror("Ошибка", "Введите корректный лимит просадки")
-            return
-
         today = datetime.now().strftime("%Y-%m-%d")
         with _write_lock:
             conn = get_connection()
@@ -581,10 +696,6 @@ class CurrenciesSettingsTab(tb.Frame):
             finally:
                 conn.close()
 
-        # Вне _write_lock и соединения: set_drawdown_limit открывает собственное
-        # соединение и пишет в ту же таблицу settings. Внутри блокировки это
-        # приводило к двум незакоммиченным write-транзакциям и "database is locked".
-        set_drawdown_limit(dd_val)
         self.last_update_date_var.set(today)
 
         # Точка истории за текущий месяц + перерисовка графика
@@ -649,7 +760,7 @@ class CurrenciesSettingsTab(tb.Frame):
 
 
 class StorageSettingsTab(tb.Frame):
-    """Вкладка «Хранилище»: расположение БД, архивация, импорт, сопоставление тикеров."""
+    """Вкладка «Хранилище»: БД, архивация, импорт, сопоставление тикеров."""
 
     def __init__(self, parent, settings_view):
         super().__init__(parent)
@@ -717,6 +828,40 @@ class StorageSettingsTab(tb.Frame):
             widget = widget.master
 
     def _create_panels(self):
+        # ─── Хранилище (база данных) ───
+        db_frame = tb.LabelFrame(self.scroll_body, text="Хранилище", padx=10, pady=10)
+        db_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(db_frame, text="Путь к базе данных:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.db_path_var = tk.StringVar(value=get_db_path())
+        tb.Entry(db_frame, textvariable=self.db_path_var, width=45, state='readonly').grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+        tb.Button(db_frame, text="Обзор…", command=self._browse_db, bootstyle="primary").grid(row=0, column=2, padx=5, pady=5)
+        tb.Button(db_frame, text="Сохранить как… (копия)", command=self._backup_db, bootstyle="success").grid(row=1, column=0, columnspan=3, pady=5)
+
+        # ─── Архивация ───
+        arch_frame = tb.LabelFrame(self.scroll_body, text="Архивация", padx=10, pady=10)
+        arch_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        from app_config import get_archive_settings, get_default_archive_folder
+        archive_settings = get_archive_settings()
+        self.archive_enabled_var = tk.BooleanVar(value=archive_settings["enabled"])
+        tb.Checkbutton(arch_frame, text="Архивировать при закрытии", variable=self.archive_enabled_var).grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
+
+        row = 1
+        tb.Label(arch_frame, text="Количество архивов:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        self.archive_count_var = tk.IntVar(value=archive_settings["count"])
+        tb.Spinbox(arch_frame, from_=1, to=99, textvariable=self.archive_count_var, width=5).grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
+        row += 1
+
+        tb.Label(arch_frame, text="Папка для архивов:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        default_folder = archive_settings["folder"] or get_default_archive_folder()
+        self.archive_folder_var = tk.StringVar(value=default_folder)
+        tb.Entry(arch_frame, textvariable=self.archive_folder_var, width=30).grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
+        tb.Button(arch_frame, text="Обзор", command=self._browse_archive_folder).grid(row=row, column=2, padx=5, pady=5)
+        row += 1
+
+        tb.Button(arch_frame, text="Сохранить", command=self._save_archive_settings, bootstyle="success").grid(row=row, column=0, columnspan=3, pady=5)
+
         # ─── Импорт ───
         import_frame = tb.LabelFrame(self.scroll_body, text="Импорт", padx=10, pady=10)
         import_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -774,67 +919,6 @@ class StorageSettingsTab(tb.Frame):
         self.income_file_var = tk.StringVar()
         tb.Entry(income_frame, textvariable=self.income_file_var, width=30).grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
         tb.Button(income_frame, text="Обзор", command=self._browse_income_file).grid(row=row, column=2, padx=5, pady=5)
-
-        # ─── Импорт заявок QUIK ───
-        quik_frame = tb.LabelFrame(self.scroll_body, text="Импорт заявок QUIK", padx=10, pady=10)
-        quik_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        tb.Label(
-            quik_frame,
-            text=(
-                "Исполненные и частично исполненные заявки из XLSX-экспорта "
-                "QUIK пишутся в транзакции (для частичных — по колонке "
-                "«Исполнено»); активы и баланс счёта меняются как при "
-                "обычных сделках (отключается галочкой в окне импорта).\n"
-                "Новые тикеры попадают в реестр (тип — по секции биржи). "
-                "Дата задаётся в окне; повторный импорт дубли не создаёт."
-            ),
-            foreground="gray", justify=tk.LEFT, wraplength=520
-        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
-
-        tb.Label(quik_frame, text="Брокер:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        self.quik_broker_var = tk.StringVar()
-        self.quik_broker_combo = tb.Combobox(
-            quik_frame, textvariable=self.quik_broker_var, width=20, state="readonly"
-        )
-        self.quik_broker_combo.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
-        tb.Button(
-            quik_frame, text="Выбрать файл…", command=self._import_quik_orders, bootstyle="primary"
-        ).grid(row=1, column=2, padx=5, pady=5)
-
-        # ─── Архивация ───
-        arch_frame = tb.LabelFrame(self.scroll_body, text="Архивация", padx=10, pady=10)
-        arch_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        from app_config import get_archive_settings, get_default_archive_folder
-        archive_settings = get_archive_settings()
-        self.archive_enabled_var = tk.BooleanVar(value=archive_settings["enabled"])
-        tb.Checkbutton(arch_frame, text="Архивировать при закрытии", variable=self.archive_enabled_var).grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
-
-        row = 1
-        tb.Label(arch_frame, text="Количество архивов:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        self.archive_count_var = tk.IntVar(value=archive_settings["count"])
-        tb.Spinbox(arch_frame, from_=1, to=99, textvariable=self.archive_count_var, width=5).grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
-        row += 1
-
-        tb.Label(arch_frame, text="Папка для архивов:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        default_folder = archive_settings["folder"] or get_default_archive_folder()
-        self.archive_folder_var = tk.StringVar(value=default_folder)
-        tb.Entry(arch_frame, textvariable=self.archive_folder_var, width=30).grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
-        tb.Button(arch_frame, text="Обзор", command=self._browse_archive_folder).grid(row=row, column=2, padx=5, pady=5)
-        row += 1
-
-        tb.Button(arch_frame, text="Сохранить", command=self._save_archive_settings, bootstyle="success").grid(row=row, column=0, columnspan=3, pady=5)
-
-        # ─── Хранилище (база данных) ───
-        db_frame = tb.LabelFrame(self.scroll_body, text="Хранилище", padx=10, pady=10)
-        db_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        tb.Label(db_frame, text="Путь к базе данных:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-        self.db_path_var = tk.StringVar(value=get_db_path())
-        tb.Entry(db_frame, textvariable=self.db_path_var, width=45, state='readonly').grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
-        tb.Button(db_frame, text="Обзор…", command=self._browse_db, bootstyle="primary").grid(row=0, column=2, padx=5, pady=5)
-        tb.Button(db_frame, text="Сохранить как… (копия)", command=self._backup_db, bootstyle="success").grid(row=1, column=0, columnspan=3, pady=5)
 
         # ─── Сопоставление тикеров ───
         match_frame = tb.LabelFrame(self.scroll_body, text="Сопоставление тикеров", padx=10, pady=10)
@@ -925,7 +1009,6 @@ class StorageSettingsTab(tb.Frame):
             self._broker_map[display] = acc['id']
         self.asset_broker_combo['values'] = values
         self.income_broker_combo['values'] = values
-        self.quik_broker_combo['values'] = values
 
     def _populate_years(self):
         """Заполнить комбобоксы года из БД."""
@@ -1156,56 +1239,6 @@ class StorageSettingsTab(tb.Frame):
         path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
         if path:
             self.income_file_var.set(path)
-
-    def _import_quik_orders(self):
-        """Импорт заявок QUIK из XLSX в transactions (окно предпросмотра)."""
-        from quik_import import parse_quik_xlsx, QuikImportDialog
-        path = filedialog.askopenfilename(
-            title="Выберите XLSX-экспорт заявок QUIK",
-            filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            orders = parse_quik_xlsx(path)
-        except ValueError as e:
-            messagebox.showerror("Ошибка формата", str(e))
-            return
-        except Exception as e:
-            messagebox.showerror("Ошибка чтения файла", f"Не удалось прочитать файл:\n{e}")
-            return
-        if not orders:
-            messagebox.showinfo("Импорт", "В файле не найдено заявок (покупка/продажа).")
-            return
-        accounts = get_all_accounts()
-        if not accounts:
-            messagebox.showwarning("Нет счетов", "Сначала создайте счёт на вкладке «Счета».")
-            return
-
-        default_account_id = self._broker_map.get(self.quik_broker_var.get())
-
-        def on_done(imported, skipped, new_tickers, stats=None):
-            msg = f"Импортировано транзакций: {imported}"
-            if skipped:
-                msg += f"\nПропущено дубликатов: {skipped}"
-            if new_tickers:
-                msg += f"\nНовых тикеров в реестре: {new_tickers}"
-            if stats:
-                if stats.get('created'):
-                    msg += (f"\nНовых позиций: {len(stats['created'])} "
-                            f"({', '.join(dict.fromkeys(stats['created']))})")
-                if stats.get('bought'):
-                    msg += (f"\nДокуплено позиций: {len(stats['bought'])} "
-                            f"({', '.join(dict.fromkeys(stats['bought']))})")
-                if stats.get('sold'):
-                    msg += (f"\nПродано позиций: {len(stats['sold'])} "
-                            f"({', '.join(dict.fromkeys(stats['sold']))})")
-                for w in stats.get('warnings', []):
-                    msg += f"\nВнимание: {w}"
-            messagebox.showinfo("Импорт заявок завершён", msg)
-
-        QuikImportDialog(self, orders, accounts,
-                         default_account_id=default_account_id, on_done=on_done)
 
     def _import_incomes(self):
         """Импорт доходов (купоны, дивиденды) из CSV."""
