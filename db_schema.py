@@ -2,7 +2,7 @@ import sqlite3
 from database import get_connection
 
 # Текущая версия схемы базы данных
-CURRENT_DB_VERSION = 4
+CURRENT_DB_VERSION = 5
 
 
 def init_schema():
@@ -134,6 +134,7 @@ def _create_all_tables(cursor):
             lot_value REAL DEFAULT 1000,
             list_level INTEGER,
             coupon_percent REAL,
+            aci_value REAL,
             FOREIGN KEY (broker_id) REFERENCES accounts(id),
             FOREIGN KEY (currency_id) REFERENCES currencies(id)
         )
@@ -353,3 +354,9 @@ def _apply_migrations(cursor, current):
         cursor.execute("UPDATE db_version SET version = 4")
         current = 4
         print("[init_schema] Применена миграция до версии 4")
+
+    if current < 5:
+        cursor.execute("ALTER TABLE assets ADD COLUMN aci_value REAL")
+        cursor.execute("UPDATE db_version SET version = 5")
+        current = 5
+        print("[init_schema] Применена миграция до версии 5")

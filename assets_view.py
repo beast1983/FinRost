@@ -88,7 +88,7 @@ class AssetsView(tb.Frame):
         table_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
         # Treeview для отображения активов
-        columns = ('name', 'portfolio_pct', 'coupon_percent', 'asset_type', 'list_level', 'quantity', 'lot_value', 'avg_price', 'current_price', 'total_value', 'purchase_date', 'last_update', 'currency')
+        columns = ('name', 'portfolio_pct', 'coupon_percent', 'asset_type', 'list_level', 'quantity', 'lot_value', 'avg_price', 'current_price', 'total_value', 'aci_value', 'last_update', 'purchase_date', 'currency')
         self.tree = tb.Treeview(table_frame, columns=columns, show='headings', height=20)
 
         style = tb.Style()
@@ -104,23 +104,25 @@ class AssetsView(tb.Frame):
         self.tree.heading('lot_value', text='Лот')
         self.tree.heading('avg_price', text='Средняя цена')
         self.tree.heading('current_price', text='Текущая цена')
-        self.tree.heading('total_value', text='Общая стоимость')
+        self.tree.heading('total_value', text='Стоимость')
+        self.tree.heading('aci_value', text='НКД')
+        self.tree.heading('last_update', text='Дата обновления')
         self.tree.heading('purchase_date', text='Дата покупки')
-        self.tree.heading('last_update', text='Последнее обновление')
         self.tree.heading('currency', text='Валюта')
 
-        self.tree.column('name', width=130)
+        self.tree.column('name', width=105)
         self.tree.column('portfolio_pct', width=60, anchor=tk.CENTER)
         self.tree.column('coupon_percent', width=80, anchor=tk.CENTER)
         self.tree.column('asset_type', width=60)
         self.tree.column('list_level', width=60, anchor=tk.CENTER)
         self.tree.column('quantity', width=60, anchor=tk.CENTER)
-        self.tree.column('lot_value', width=90, anchor=tk.E)
+        self.tree.column('lot_value', width=65, anchor=tk.E)
         self.tree.column('avg_price', width=80, anchor=tk.E)
         self.tree.column('current_price', width=85, anchor=tk.E)
-        self.tree.column('total_value', width=120, anchor=tk.E)
+        self.tree.column('total_value', width=75, anchor=tk.E)
+        self.tree.column('aci_value', width=70, anchor=tk.E)
+        self.tree.column('last_update', width=95, anchor=tk.CENTER)
         self.tree.column('purchase_date', width=90, anchor=tk.CENTER)
-        self.tree.column('last_update', width=120, anchor=tk.CENTER)
         self.tree.column('currency', width=60, anchor=tk.CENTER)
 
         self.tree.configure(style='Assets.Treeview')
@@ -315,9 +317,10 @@ class AssetsView(tb.Frame):
                         lv = fv * ls if fv and ls else fv
                         ll = static_data.get("list_level")
                         cp = static_data.get("coupon_percent")
+                        aci = static_data.get("aci")
                         update_asset_price(asset_id, price, now,
                                          face_value=fv, lot_size=ls, lot_value=lv,
-                                         list_level=ll, coupon_percent=cp)
+                                         list_level=ll, coupon_percent=cp, aci=aci)
                     else:
                         update_asset_price(asset_id, price, now)
                     success += 1
@@ -477,6 +480,13 @@ class AssetsView(tb.Frame):
                 cp = asset["coupon_percent"]
                 coupon_display = f"{cp:.2f}" if cp is not None else "—"
 
+                # НКД: сумма = НКД на одну бумагу × количество (в валюте бумаги)
+                aci = asset["aci_value"] if "aci_value" in asset.keys() else None
+                if asset["asset_type"] == "облигация" and aci:
+                    aci_str = f"{aci * asset['quantity']:.2f}"
+                else:
+                    aci_str = "—"
+
                 # Сравнение текущей цены со средней ценой покупки (доходность после покупки).
                 # Цены в одном масштабе (валюта бумаги; облигации — % от номинала),
                 # поэтому сравниваем напрямую. Зелёный — выросла, красный — упала.
@@ -508,6 +518,7 @@ class AssetsView(tb.Frame):
                     "avg_price_str": f"{asset['avg_price']:.2f}",
                     "price_str": price_str,
                     "total_str": f"{total_rub:.2f}",
+                    "aci_str": aci_str,
                     "purchase_date": asset["purchase_date"],
                     "update_display": update_display,
                     "currency": currency,
@@ -542,8 +553,9 @@ class AssetsView(tb.Frame):
                     r["avg_price_str"],
                     r["price_str"],
                     r["total_str"],
-                    r["purchase_date"],
+                    r["aci_str"],
                     r["update_display"],
+                    r["purchase_date"],
                     r["currency"]
                 ), tags=(str(r["id"]),) + r["cmp_tag"])
 

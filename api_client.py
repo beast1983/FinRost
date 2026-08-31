@@ -305,6 +305,7 @@ def _fetch_bond_static(ticker):
         face_value (float) — номинал облигации
         lot_size (int)     — количество бумаг в лоте
         list_level (int)   — уровень листинга (1, 2, 3)
+        aci (float)        — накопленный купонный доход (НКД) на одну бумагу
     
     Возвращает None при ошибке.
     """
@@ -328,12 +329,14 @@ def _fetch_bond_static(ticker):
         lot_size = None
         list_level = None
         coupon_percent = None
-        
+        aci = None
+
         row = rows[0]
         face_idx = col_map.get("FACEVALUE")
         lot_idx = col_map.get("LOTSIZE")
         level_idx = col_map.get("LISTLEVEL")
         coupon_idx = col_map.get("COUPONPERCENT")
+        aci_idx = col_map.get("ACCRUEDINT")
         
         if face_idx is not None and len(row) > face_idx and row[face_idx] is not None:
             face_value = float(row[face_idx])
@@ -343,12 +346,15 @@ def _fetch_bond_static(ticker):
             list_level = int(row[level_idx])
         if coupon_idx is not None and len(row) > coupon_idx and row[coupon_idx] is not None:
             coupon_percent = float(row[coupon_idx])
-        
+        if aci_idx is not None and len(row) > aci_idx and row[aci_idx] is not None:
+            aci = float(row[aci_idx])
+
         return {
             "face_value": face_value,
             "lot_size": lot_size,
             "list_level": list_level,
             "coupon_percent": coupon_percent,
+            "aci": aci,
         }
         
     except (ValueError, TypeError, IndexError, KeyError):

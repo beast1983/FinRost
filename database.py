@@ -2010,7 +2010,7 @@ def calculate_total_in_rubles(quantity, avg_price, currency_id, rates, asset_typ
 #  Prices
 # ================================================================
 
-def update_asset_price(asset_id, current_price, last_update, face_value=None, lot_size=None, lot_value=None, list_level=None, coupon_percent=None):
+def update_asset_price(asset_id, current_price, last_update, face_value=None, lot_size=None, lot_value=None, list_level=None, coupon_percent=None, aci=None):
     """Обновить текущую цену, дату и (опционально) метаданные облигации.
 
     Может вызываться из фонового потока обновления цен, поэтому write
@@ -2041,6 +2041,9 @@ def update_asset_price(asset_id, current_price, last_update, face_value=None, lo
             if coupon_percent is not None:
                 sets.append("coupon_percent = ?")
                 params.append(coupon_percent)
+            if aci is not None:
+                sets.append("aci_value = ?")
+                params.append(aci)
             params.append(asset_id)
             cursor.execute(f"""
                 UPDATE assets
