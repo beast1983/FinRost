@@ -192,7 +192,7 @@ def import_ticker_names(rows):
             asset_type = (row[2] or '').strip() if len(row) > 2 else ''
             lot_size = row[3] if len(row) > 3 else 1
             try:
-                lot_size = int(lot_size) if lot_size else 1
+                lot_size = float(lot_size) if lot_size else 1
             except (ValueError, TypeError):
                 lot_size = 1
             currency = (row[4] or '').strip() if len(row) > 4 else ''
@@ -281,7 +281,7 @@ def update_ticker_name(ticker, name, lot_size=None, currency=None, asset_type=No
     if lot_size is not None:
         sets.append("lot_size = ?")
         try:
-            params.append(int(lot_size))
+            params.append(float(lot_size))
         except (ValueError, TypeError):
             params.append(1)
     if currency is not None:
@@ -304,7 +304,7 @@ def add_ticker_name(ticker, name, asset_type='', lot_size=1, currency=''):
     name = str(name).strip() if name else ''
     asset_type = str(asset_type).strip() if asset_type else ''
     try:
-        lot_size = int(lot_size) if lot_size else 1
+        lot_size = float(lot_size) if lot_size else 1
     except (ValueError, TypeError):
         lot_size = 1
     currency = str(currency).strip().upper() if currency else ''
@@ -505,7 +505,7 @@ def update_ticker_from_moex(ticker, shortname, currency, lot_size, asset_type=No
         ticker: тикер (верхний регистр)
         shortname: SHORTNAME с биржи (перезапишет name если отличается)
         currency: валюта (SUR→RUB уже должно быть сделано вызывающим)
-        lot_size: лотность (int)
+        lot_size: лотность; для облигаций — номинал (float)
         asset_type: тип ('акция'/'облигация'/'etf') — None = не трогать
     """
     conn = get_connection()
@@ -514,7 +514,7 @@ def update_ticker_from_moex(ticker, shortname, currency, lot_size, asset_type=No
     shortname = str(shortname).strip() if shortname else ''
     currency = str(currency).strip().upper() if currency else ''
     try:
-        lot_size = int(lot_size) if lot_size else 1
+        lot_size = float(lot_size) if lot_size else 1
     except (ValueError, TypeError):
         lot_size = 1
 
@@ -902,14 +902,19 @@ def _revert_sell_position(cursor, account_id, asset_id, ticker, qty, price,
         lot_size = tn["lot_size"] if tn["lot_size"] else 1
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Для облигаций lot_size в реестре — номинал (может быть дробным)
+    if asset_type == "облигация" and lot_size and lot_size > 1:
+        fv = lot_size
+    else:
+        fv = 1000
     cursor.execute("""
         INSERT INTO assets
             (ticker, name, asset_type, quantity, avg_price, broker_id,
              purchase_date, created_at, currency_id, face_value, lot_size,
              lot_value, list_level)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1000, ?, 1000, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     """, (ticker, name, asset_type, qty, price, account_id,
-          tx_date, now, currency_id or 1, lot_size))
+          tx_date, now, currency_id or 1, fv, lot_size, fv))
 
 
 def delete_transaction(tx_id):
@@ -1036,7 +1041,7 @@ def compute_amount_in_account_currency(amount, asset_code, account_code, rates):
 
 
 def add_asset(ticker, asset_type, quantity, price, purchase_date, account_id=None,
-              name='', currency_code='RUB', lot_size=1):
+              name='', currency_code='RUB', lot_size=1, face_value=None):
     """Добавление актива."""
     currency_id = get_currency_id(currency_code)
     conn = get_connection()
@@ -1049,8 +1054,12 @@ def add_asset(ticker, asset_type, quantity, price, purchase_date, account_id=Non
     upsert_ticker_name(ticker, name, cursor=cursor)
 
     if asset_type == "облигация":
-        purchase_sum = quantity * price * 1000 / 100
+        # Номинал облигации (при амортизации может быть дробным и меньше 1000).
+        # Для облигаций в поле «Лотность» формы передаётся номинал.
+        fv = face_value if (face_value and face_value > 0) else (ls if ls > 1 else 1000)
+        purchase_sum = quantity * price * fv / 100
     else:
+        fv = 1000
         purchase_sum = quantity * ls * price
 
     acc_currency_id = currency_id
@@ -1080,8 +1089,8 @@ def add_asset(ticker, asset_type, quantity, price, purchase_date, account_id=Non
     cursor.execute("""
         INSERT INTO assets
             (ticker, name, asset_type, quantity, avg_price, broker_id, purchase_date, created_at, currency_id, face_value, lot_size, lot_value, list_level)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1000, ?, 1000, NULL)
-    """, (ticker, name, asset_type, quantity, price, account_id, purchase_date, created_at, currency_id, ls))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    """, (ticker, name, asset_type, quantity, price, account_id, purchase_date, created_at, currency_id, fv, ls, fv))
     asset_id = cursor.lastrowid
 
     if account_id is not None:
@@ -1304,7 +1313,13 @@ def buy_more_asset(asset_id, add_qty, buy_price, buy_date, account_id=None, lot_
     ls = asset["lot_size"] if asset["lot_size"] and asset["lot_size"] > 0 else (lot_size or 1)
 
     if asset["asset_type"] == "облигация":
+        # Номинал: из позиции; если там остался значение по умолчанию 1000
+        # (старые записи), а из формы передан номинал (для облигаций
+        # lot_size = номинал) — используем и сохраняем его
         fv = asset["face_value"] or 1000
+        if fv == 1000 and lot_size is not None and lot_size > 1 and lot_size != fv:
+            fv = lot_size
+            cursor.execute("UPDATE assets SET face_value = ? WHERE id = ?", (fv, asset_id))
         purchase_sum = add_qty * buy_price * fv / 100
     else:
         purchase_sum = add_qty * ls * buy_price

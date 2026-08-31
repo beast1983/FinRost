@@ -1459,7 +1459,7 @@ class TickerRegistryTab(tb.Frame):
 
         tb.Label(dialog, text="Лотность:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
         lot_var = tk.StringVar(value="1")
-        lot_spin = tb.Spinbox(dialog, from_=1, to=9999, textvariable=lot_var, width=28, format="%d")
+        lot_spin = tb.Spinbox(dialog, from_=1, to=999999, increment=1, textvariable=lot_var, width=28)
         lot_spin.grid(row=row, column=1, padx=5, pady=5)
         row += 1
 
@@ -1476,7 +1476,7 @@ class TickerRegistryTab(tb.Frame):
             lot_size = lot_var.get()
             currency = curr_var.get()
             try:
-                lot_size = int(lot_size)
+                lot_size = float(lot_size.replace(',', '.'))
             except ValueError:
                 lot_size = 1
             if not ticker:
@@ -1549,7 +1549,7 @@ class TickerRegistryTab(tb.Frame):
 
         tb.Label(dialog, text="Лотность:").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
         lot_var = tk.StringVar(value=old_lot)
-        lot_spin = tb.Spinbox(dialog, from_=1, to=9999, textvariable=lot_var, width=28, format="%d")
+        lot_spin = tb.Spinbox(dialog, from_=1, to=999999, increment=1, textvariable=lot_var, width=28)
         lot_spin.grid(row=row, column=1, padx=5, pady=5)
         row += 1
 
@@ -1566,7 +1566,7 @@ class TickerRegistryTab(tb.Frame):
             lot_size = lot_var.get()
             currency = curr_var.get()
             try:
-                lot_size = int(lot_size)
+                lot_size = float(lot_size.replace(',', '.'))
             except ValueError:
                 lot_size = 1
             if not new_ticker:
@@ -1733,7 +1733,7 @@ class TickerRegistryTab(tb.Frame):
             lot_size = 1
             if len(parts) > 3:
                 try:
-                    lot_size = int(parts[3].strip())
+                    lot_size = float(parts[3].strip().replace(',', '.'))
                 except (ValueError, TypeError):
                     pass
             currency = ''

@@ -415,24 +415,32 @@ def import_orders_as_transactions(orders, account_id, tx_date, type_map=None,
                         stats['bought'].append(asset["ticker"])
                     elif ticker:
                         asset_type = type_map.get(ticker.upper(), '')
-                        if not asset_type:
-                            cursor.execute(
-                                "SELECT asset_type FROM ticker_names "
-                                "WHERE ticker = ?",
-                                (ticker.upper(),),
-                            )
-                            tn_row = cursor.fetchone()
-                            if tn_row and tn_row['asset_type']:
-                                asset_type = tn_row['asset_type']
+                        # Для облигаций в реестре lot_size — номинал
+                        tn_lot = None
+                        cursor.execute(
+                            "SELECT asset_type, lot_size FROM ticker_names "
+                            "WHERE ticker = ?",
+                            (ticker.upper(),),
+                        )
+                        tn_row = cursor.fetchone()
+                        if not asset_type and tn_row and tn_row['asset_type']:
+                            asset_type = tn_row['asset_type']
+                        if tn_row and tn_row['lot_size']:
+                            tn_lot = tn_row['lot_size']
+                        if asset_type == 'облигация':
+                            fv = tn_lot if (tn_lot and tn_lot > 0) else 1000
+                        else:
+                            fv = 1000
                         cursor.execute("""
                             INSERT INTO assets
                                 (ticker, name, asset_type, quantity, avg_price,
                                  broker_id, purchase_date, created_at,
                                  currency_id, face_value, lot_size, lot_value,
                                  list_level)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1000, 1, 1000, NULL)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL)
                         """, (ticker, o['name'], asset_type, qty, price,
-                              account_id, tx_date, now, asset_currency_id))
+                              account_id, tx_date, now, asset_currency_id,
+                              fv, fv))
                         asset_id = cursor.lastrowid
                         stats['created'].append(ticker)
                     # Списание с баланса (баланс может уйти в минус)

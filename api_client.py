@@ -148,7 +148,8 @@ def fetch_ticker_static(ticker):
         dict с ключами:
             shortname (str) — короткое название бумаги
             currency (str)  — валюта (SUR маппится в RUB)
-            lot_size (int)  — количество бумаг в лоте
+            lot_size (int/float) — количество бумаг в лоте;
+                                   для облигаций — номинал FACEVALUE (может быть дробным)
             asset_type (str) — 'акция' / 'облигация' / 'etf'
         None при ошибке/отсутствии данных.
     """
@@ -216,11 +217,12 @@ def fetch_ticker_static(ticker):
 
         lot_size = 1
         if market == "bonds":
-            # Для облигаций — FACEVALUE (номинал), с fallback на LOTSIZE
+            # Для облигаций — FACEVALUE (номинал, может быть дробным при амортизации),
+            # с fallback на LOTSIZE
             fv_idx = col_map.get("FACEVALUE")
             if fv_idx is not None and len(row) > fv_idx and row[fv_idx] is not None:
                 try:
-                    lot_size = int(float(row[fv_idx]))
+                    lot_size = float(row[fv_idx])
                 except (ValueError, TypeError):
                     lot_size = 1
             if lot_size <= 0:

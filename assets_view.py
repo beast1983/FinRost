@@ -1201,9 +1201,9 @@ class AssetsView(tb.Frame):
             name = info_fields["name"].get().strip()
             asset_type = type_combo_var.get()
             currency = currency_combo_var.get()
-            lot_val = lot_var.get().strip()
+            lot_val = lot_var.get().strip().replace(',', '.')
             try:
-                lot_size = int(float(lot_val)) if lot_val else 1
+                lot_size = float(lot_val) if lot_val else 1
             except (ValueError, TypeError):
                 lot_size = 1
             try:
@@ -1421,8 +1421,8 @@ class AssetsView(tb.Frame):
                 return
 
             try:
-                lot_val = lot_var.get().strip()
-                lot_size = int(float(lot_val)) if lot_val else 1
+                lot_val = lot_var.get().strip().replace(',', '.')
+                lot_size = float(lot_val) if lot_val else 1
             except (ValueError, TypeError):
                 lot_size = 1
 
@@ -1500,8 +1500,11 @@ class AssetsView(tb.Frame):
                             return  # Cancel
                         break
 
+                # Для облигаций поле «Лотность» содержит номинал
+                fv = lot_size if asset_type == "облигация" else None
                 result, success, msg = add_asset(ticker, asset_type, qty, price, buy_date,
-                                                  account_id=account_id, name=name, currency_code=currency, lot_size=lot_size)
+                                                  account_id=account_id, name=name, currency_code=currency,
+                                                  lot_size=lot_size, face_value=fv)
                 if success:
                     _persist_ticker_registry()
                     messagebox.showinfo("Успех", f"Актив {ticker} добавлен\n{msg}")
