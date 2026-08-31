@@ -105,7 +105,7 @@ class AssetsView(tb.Frame):
         self.tree.heading('avg_price', text='Средняя цена')
         self.tree.heading('current_price', text='Текущая цена')
         self.tree.heading('total_value', text='Стоимость')
-        self.tree.heading('aci_value', text='НКД')
+        self.tree.heading('aci_value', text='НКД, ₽')
         self.tree.heading('last_update', text='Дата обновления')
         self.tree.heading('purchase_date', text='Дата покупки')
         self.tree.heading('currency', text='Валюта')
@@ -480,7 +480,9 @@ class AssetsView(tb.Frame):
                 cp = asset["coupon_percent"]
                 coupon_display = f"{cp:.2f}" if cp is not None else "—"
 
-                # НКД: сумма = НКД на одну бумагу × количество (в валюте бумаги)
+                # НКД: сумма = НКД на одну бумагу × количество.
+                # MOEX ISS отдаёт НКД в рублях (валюта торгов рынка облигаций)
+                # даже для облигаций с долларовым/евро номиналом — без конвертации.
                 aci = asset["aci_value"] if "aci_value" in asset.keys() else None
                 if asset["asset_type"] == "облигация" and aci:
                     aci_str = f"{aci * asset['quantity']:.2f}"
