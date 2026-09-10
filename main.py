@@ -80,7 +80,7 @@ class InvestmentApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"{APP_NAME_RU} {APP_VERSION}")
-        self.root.geometry("1200x700")
+        self.root.geometry("1300x700")
 
         # Текущий выбранный счёт (0 = все)
         self.selected_account_id = tk.IntVar(value=0)

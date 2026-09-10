@@ -11,6 +11,7 @@ from database import (
     get_snapshot_years, get_transaction_years,
     import_asset_slices, import_incomes,
     get_all_ticker_names, import_ticker_names, add_ticker_name, update_ticker_name, delete_ticker_name, rename_ticker, get_ticker_name, get_ticker_info,
+    set_ticker_disabled, get_disabled_tickers,
     update_ticker_from_moex, convert_placeholder_tickers,
     get_db_path, backup_database,
     get_drawdown_limit, set_drawdown_limit,
@@ -1380,7 +1381,7 @@ class TickerRegistryTab(tb.Frame):
         table_frame = tb.LabelFrame(self, text="Реестр", padx=5, pady=5)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        columns = ('ticker', 'name', 'type', 'lot_size', 'currency')
+        columns = ('ticker', 'name', 'type', 'lot_size', 'currency', 'off')
         self.tree = tb.Treeview(table_frame, columns=columns, show='headings')
 
         self.tree.heading('ticker', text='Тикер')
@@ -1388,12 +1389,17 @@ class TickerRegistryTab(tb.Frame):
         self.tree.heading('type', text='Тип')
         self.tree.heading('lot_size', text='Лотность')
         self.tree.heading('currency', text='Валюта')
+        self.tree.heading('off', text='Выкл')
 
         self.tree.column('ticker', width=140)
         self.tree.column('name', width=200)
         self.tree.column('type', width=70)
         self.tree.column('lot_size', width=60)
         self.tree.column('currency', width=60)
+        self.tree.column('off', width=50, anchor=tk.CENTER, stretch=False)
+
+        # Выключенные тикеры — серым
+        self.tree.tag_configure('disabled', foreground='gray')
 
         scrollbar = tb.Scrollbar(
             table_frame, orient=tk.VERTICAL, command=self.tree.yview,
@@ -1402,8 +1408,38 @@ class TickerRegistryTab(tb.Frame):
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Двойной клик для редактирования
-        self.tree.bind('<Double-1>', lambda e: self._edit_ticker())
+        # Клик по колонке «Выкл» — переключить флаг
+        self.tree.bind('<Button-1>', self._on_tree_click)
+
+        # Двойной клик для редактирования (кроме колонки «Выкл»)
+        self.tree.bind('<Double-1>', self._on_double_click)
+
+    def _on_tree_click(self, event):
+        """Клик по колонке «Выкл» — переключить отключение тикера от обновления."""
+        if self.tree.identify_region(event.x, event.y) != 'cell':
+            return
+        if self.tree.identify_column(event.x) != '#6':
+            return
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+        ticker = None
+        for t in self.tree.item(item_id)['tags']:
+            if t != 'disabled':
+                ticker = t
+                break
+        if not ticker:
+            return
+        info = get_ticker_info(str(ticker))
+        new_state = not (info and info.get("disabled"))
+        set_ticker_disabled(str(ticker), new_state)
+        self.refresh()
+
+    def _on_double_click(self, event):
+        """Двойной клик: редактирование (кроме колонки «Выкл»)."""
+        if self.tree.identify_column(event.x) == '#6':
+            return
+        self._edit_ticker()
 
     def _on_search(self):
         """Перезапустить обновление с debounce для поиска."""
@@ -1422,11 +1458,18 @@ class TickerRegistryTab(tb.Frame):
         search = self.search_var.get().strip().lower()
         rows = get_all_ticker_names()
 
-        for ticker, name, asset_type, lot_size, currency in rows:
+        for row in rows:
+            ticker, name, asset_type, lot_size, currency, disabled = (
+                row[0], row[1], row[2], row[3], row[4], (row[5] if len(row) > 5 else 0))
             if search and search not in ticker.lower() and search not in name.lower() and search not in (asset_type or '').lower():
                 continue
             ui_type = _ui_type(asset_type)
-            self.tree.insert('', tk.END, values=(ticker, name or '', ui_type, lot_size or '', currency or ''), tags=(ticker,))
+            is_off = bool(disabled)
+            tags = (ticker, 'disabled') if is_off else (ticker,)
+            self.tree.insert('', tk.END,
+                             values=(ticker, name or '', ui_type, lot_size or '',
+                                     currency or '', '☑' if is_off else '☐'),
+                             tags=tags)
 
     def _add_ticker(self):
         """Добавить новый тикер."""
@@ -1515,14 +1558,16 @@ class TickerRegistryTab(tb.Frame):
 
         # Ищем полную информацию в БД (тип может быть в нижнем регистре)
         info = get_ticker_info(old_ticker)
+        old_disabled = False
         if info:
             old_type = info.get("asset_type", old_type) or 'акция'
             old_lot = str(info.get("lot_size", 1))
             old_curr = info.get("currency", old_curr) or ''
+            old_disabled = bool(info.get("disabled"))
 
         dialog = tb.Toplevel(self)
         dialog.title("Редактировать тикер")
-        dialog.geometry("380x400")
+        dialog.geometry("380x440")
         dialog.transient(self)
         dialog.grab_set()
 
@@ -1559,6 +1604,12 @@ class TickerRegistryTab(tb.Frame):
         curr_combo.grid(row=row, column=1, padx=5, pady=5)
         row += 1
 
+        off_var = tk.BooleanVar(value=old_disabled)
+        tb.Checkbutton(
+            dialog, text="Выключить от обновления цен (снята с торгов)",
+            variable=off_var,
+        ).grid(row=row, column=0, columnspan=2, padx=10, pady=5, sticky=tk.W)
+
         def on_ok():
             new_ticker = ticker_var.get().strip().upper()
             name = name_var.get().strip()
@@ -1578,6 +1629,7 @@ class TickerRegistryTab(tb.Frame):
             try:
                 rename_ticker(old_ticker, new_ticker, name)
                 update_ticker_name(new_ticker, name, lot_size=lot_size, currency=currency, asset_type=asset_type)
+                set_ticker_disabled(new_ticker, off_var.get())
             except ValueError as e:
                 messagebox.showwarning("Ошибка", str(e))
                 return
@@ -1603,35 +1655,50 @@ class TickerRegistryTab(tb.Frame):
             self.refresh()
 
     def _sync_from_moex(self):
-        """Обновить данные тикеров с Мосбиржи."""
+        """Обновить данные тикеров с Мосбиржи (выключенные не опрашиваются)."""
         sel = self.tree.selection()
         if sel:
-            tickers = [self.tree.item(s)['tags'][0] for s in sel]
+            all_tickers = [self.tree.item(s)['tags'][0] for s in sel]
         else:
-            tickers = [self.tree.item(c)['tags'][0] for c in self.tree.get_children()]
+            all_tickers = [self.tree.item(c)['tags'][0] for c in self.tree.get_children()]
+
+        # Тикеры с флагом «Выкл» не проверяем (например, погашенные облигации)
+        disabled_set = get_disabled_tickers()
+        tickers = [t for t in all_tickers if str(t) not in disabled_set]
+        skipped = len(all_tickers) - len(tickers)
 
         if not tickers:
-            messagebox.showinfo("Информация", "Нет тикеров для обновления.")
+            messagebox.showinfo(
+                "Информация",
+                "Нет тикеров для обновления"
+                + (f" (выключено: {skipped})." if skipped else "."))
             return
 
         total = len(tickers)
         ok_count = 0
         fail_count = 0
+        auto_disabled = 0
         failed_list = []
         idx = 0
 
         self._sync_status_var.set("Обновление...")
 
         def _do_sync():
-            nonlocal ok_count, fail_count, idx
+            nonlocal ok_count, fail_count, auto_disabled, idx
             if idx >= total:
                 msg = f"Готово: {ok_count} OK, {fail_count} ошибок"
+                if auto_disabled > 0:
+                    msg += f", выключено: {auto_disabled}"
+                if skipped > 0:
+                    msg += f", пропущено (выкл): {skipped}"
                 self._sync_status_var.set(msg)
                 self.refresh()
                 if failed_list:
                     lines = [f"Не удалось обновить ({len(failed_list)}):"]
                     for t, reason in failed_list:
                         lines.append(f"  {t} — {reason}")
+                    lines.append("")
+                    lines.append("Выключенные тикеры не участвуют в обновлении цен и синхронизации.")
                     messagebox.showwarning("Необновлённые тикеры", "\n".join(lines))
                 return
 
@@ -1652,7 +1719,10 @@ class TickerRegistryTab(tb.Frame):
                     ok_count += 1
                 else:
                     fail_count += 1
-                    failed_list.append((ticker, "нет данных / снят с торгов"))
+                    # Бумага снята с торгов — исключаем из дальнейших обновлений
+                    set_ticker_disabled(ticker, True)
+                    auto_disabled += 1
+                    failed_list.append((ticker, "нет данных / снят с торгов — выключен"))
             except Exception as e:
                 fail_count += 1
                 failed_list.append((ticker, str(e)))
@@ -1681,13 +1751,15 @@ class TickerRegistryTab(tb.Frame):
             return
         try:
             with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
-                f.write('Тикер;Название;Тип;Лотность;Валюта\n')
-                for ticker, name, asset_type, lot_size, currency in rows:
+                f.write('Тикер;Название;Тип;Лотность;Валюта;Выкл\n')
+                for row in rows:
+                    ticker, name, asset_type, lot_size, currency = row[:5]
+                    disabled = row[5] if len(row) > 5 else 0
                     name = name or ''
                     if ';' in name:
                         name = '"' + name.replace('"', '""') + '"'
                     ui_type = _ui_type(asset_type)
-                    f.write(f'{ticker};{name};{ui_type};{lot_size or ""};{currency or ""}\n')
+                    f.write(f'{ticker};{name};{ui_type};{lot_size or ""};{currency or ""};{1 if disabled else 0}\n')
             messagebox.showinfo("Успех", f"Экспортировано {len(rows)} тикеров.\n{filepath}")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось экспортировать:\n{e}")
@@ -1741,9 +1813,14 @@ class TickerRegistryTab(tb.Frame):
                 currency = parts[4].strip().upper()
                 if currency not in _CURRENCY_CHOICES:
                     currency = ''
+            disabled = 0
+            if len(parts) > 5:
+                raw_off = parts[5].strip().lower()
+                if raw_off in ('1', 'да', 'true', 'yes', 'y', 'выкл', '☑'):
+                    disabled = 1
             if not ticker:
                 continue
-            rows.append((ticker, name, asset_type, lot_size, currency))
+            rows.append((ticker, name, asset_type, lot_size, currency, disabled))
         if not rows:
             messagebox.showinfo("Импорт", "Файл не содержит данных для импорта.")
             return

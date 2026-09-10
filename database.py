@@ -179,7 +179,8 @@ def import_ticker_names(rows):
     """Массовый импорт/обновление записей тикеров.
 
     rows: список кортежей произвольной длины —
-      [(ticker,), (ticker, name), (ticker, name, type), (ticker, name, type, lot), (ticker, name, type, lot, currency), ...]
+      [(ticker,), (ticker, name), (ticker, name, type), (ticker, name, type, lot),
+       (ticker, name, type, lot, currency), (ticker, name, type, lot, currency, disabled), ...]
     """
     conn = get_connection()
     cursor = conn.cursor()
@@ -196,8 +197,9 @@ def import_ticker_names(rows):
             except (ValueError, TypeError):
                 lot_size = 1
             currency = (row[4] or '').strip() if len(row) > 4 else ''
+            disabled = 1 if (len(row) > 5 and row[5]) else 0
 
-            # Формируем SET-кlausулы только для явно переданных колонок
+            # Формируем SET-клаузулы только для явно переданных колонок
             set_clauses = []
             if len(row) > 1 and name:
                 set_clauses.append("name = excluded.name")
@@ -207,13 +209,15 @@ def import_ticker_names(rows):
                 set_clauses.append("lot_size = excluded.lot_size")
             if len(row) > 4 and currency:
                 set_clauses.append("currency = excluded.currency")
+            if len(row) > 5:
+                set_clauses.append("disabled = excluded.disabled")
             set_str = ", ".join(set_clauses) or "name = excluded.name"
 
             cursor.execute(f"""
-                INSERT INTO ticker_names (ticker, name, asset_type, lot_size, currency)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO ticker_names (ticker, name, asset_type, lot_size, currency, disabled)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ticker) DO UPDATE SET {set_str}
-            """, (ticker, name, asset_type, lot_size, currency))
+            """, (ticker, name, asset_type, lot_size, currency, disabled))
         count = len([r for r in rows if (r[0] or '').strip()])
         conn.commit()
     except Exception as e:
@@ -225,10 +229,10 @@ def import_ticker_names(rows):
 
 
 def get_all_ticker_names():
-    """Получить все записи реестра: [(ticker, name, asset_type, lot_size, currency), ...]."""
+    """Получить все записи реестра: [(ticker, name, asset_type, lot_size, currency, disabled), ...]."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT ticker, name, asset_type, lot_size, currency FROM ticker_names ORDER BY ticker")
+    cursor.execute("SELECT ticker, name, asset_type, lot_size, currency, disabled FROM ticker_names ORDER BY ticker")
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -270,8 +274,8 @@ def search_ticker_names(query, limit=3):
     return [m[2] for m in matches[:limit]]
 
 
-def update_ticker_name(ticker, name, lot_size=None, currency=None, asset_type=None):
-    """Обновить имя тикера (и опционально lot_size, currency, asset_type)."""
+def update_ticker_name(ticker, name, lot_size=None, currency=None, asset_type=None, disabled=None):
+    """Обновить имя тикера (и опционально lot_size, currency, asset_type, disabled)."""
     conn = get_connection()
     cursor = conn.cursor()
     ticker = str(ticker).strip().upper()
@@ -290,10 +294,41 @@ def update_ticker_name(ticker, name, lot_size=None, currency=None, asset_type=No
     if asset_type is not None:
         sets.append("asset_type = ?")
         params.append(str(asset_type).strip() if asset_type else '')
+    if disabled is not None:
+        sets.append("disabled = ?")
+        params.append(1 if disabled else 0)
     params.append(ticker)
     cursor.execute(f"UPDATE ticker_names SET {', '.join(sets)} WHERE ticker = ?", params)
     conn.commit()
     conn.close()
+
+
+def set_ticker_disabled(ticker, disabled):
+    """Установить/снять флаг «Выкл» (исключён из автополучения цен).
+
+    Если тикера нет в реестре — создаёт запись с пустым именем.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    ticker = str(ticker).strip().upper()
+    if not ticker:
+        return
+    cursor.execute("""
+        INSERT INTO ticker_names (ticker, name, disabled) VALUES (?, '', ?)
+        ON CONFLICT(ticker) DO UPDATE SET disabled = excluded.disabled
+    """, (ticker, 1 if disabled else 0))
+    conn.commit()
+    conn.close()
+
+
+def get_disabled_tickers():
+    """Множество тикеров с флагом «Выкл» (исключены из автополучения цен)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT ticker FROM ticker_names WHERE disabled = 1")
+    rows = cursor.fetchall()
+    conn.close()
+    return {row["ticker"] for row in rows}
 
 
 def add_ticker_name(ticker, name, asset_type='', lot_size=1, currency=''):
@@ -483,7 +518,7 @@ def get_ticker_info(ticker):
     """
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT ticker, name, asset_type, lot_size, currency FROM ticker_names WHERE ticker = ?",
+    cursor.execute("SELECT ticker, name, asset_type, lot_size, currency, disabled FROM ticker_names WHERE ticker = ?",
                     (str(ticker).strip().upper(),))
     row = cursor.fetchone()
     conn.close()
@@ -494,6 +529,7 @@ def get_ticker_info(ticker):
             "asset_type": row["asset_type"] or '',
             "lot_size": row["lot_size"] if row["lot_size"] else 1,
             "currency": row["currency"] or '',
+            "disabled": bool(row["disabled"]),
         }
     return None
 

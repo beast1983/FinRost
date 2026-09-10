@@ -35,24 +35,30 @@ def fetch_price(ticker, asset_type):
         asset_type (str): 'акция', 'облигация' или 'etf'
 
     Returns:
-        tuple: (price, None) при успехе или (None, error_message) при ошибке.
+        tuple: (price, None) при успехе или (None, error_code) при ошибке.
                price — float цена одной бумаги, либо None.
+               error_code — машинный код причины:
+                   'network'      — нет связи с биржей (сеть/таймаут/нет ответа)
+                   'not_found'    — биржа ответила, но бумага не найдена,
+                                    снята с торгов или нет данных о цене
+                   'unknown_type' — неизвестный тип актива
     """
     ticker = ticker.upper().strip()
 
     if asset_type == "акция":
-        price = _fetch_share_price(ticker)
+        price, status = _fetch_price_generic(ticker, "shares")
     elif asset_type == "облигация":
-        price = _fetch_bond_price(ticker)
+        price, status = _fetch_price_generic(ticker, "bonds")
     elif asset_type == "etf":
-        price = _fetch_share_price(ticker)
+        price, status = _fetch_price_generic(ticker, "shares")
     else:
-        return None, f"Неизвестный тип актива: {asset_type}"
+        return None, "unknown_type"
 
     if price is not None and price > 0:
         return round(price, 2), None
-    else:
-        return None, f"Цена для {ticker} не найдена на бирже"
+    if status == "network":
+        return None, "network"
+    return None, "not_found"
 
 
 def _fetch_price_generic(ticker, market):
@@ -70,12 +76,12 @@ def _fetch_price_generic(ticker, market):
         market (str): 'shares' или 'bonds'
 
     Returns:
-        float или None — цена бумаги, либо None при ошибке/отсутствии данных.
+        (price, status): price — float или None; status — 'ok' | 'not_found' | 'network'.
     """
     url = f"{API_BASE}/engines/stock/markets/{market}/securities/{ticker}.json"
     data = _fetch_iss_data(url)
     if data is None:
-        return None
+        return None, "network"
 
     try:
         marketdata = data.get("marketdata", {})
@@ -107,28 +113,28 @@ def _fetch_price_generic(ticker, market):
         # 1. LAST (по любой доске) — текущая цена последней сделки
         price = first_nonnull(md_rows, md_idx, "LAST")
         if price:
-            return price
+            return price, "ok"
 
         # 2. PREVPRICE из securities — приоритетный fallback (цена закрытия прошлой сессии)
         price = first_nonnull(sec_rows, sec_idx, "PREVPRICE")
         if price:
-            return price
+            return price, "ok"
 
         # 3. Дополнительные fallback'ы из securities
         for col in ("PREVWAPRICE", "PREVLEGALCLOSEPRICE"):
             price = first_nonnull(sec_rows, sec_idx, col)
             if price:
-                return price
+                return price, "ok"
 
         # 4. Дополнительные fallback'ы из marketdata
         for col in ("MARKETPRICE", "MARKETPRICE2", "LCURRENTPRICE"):
             price = first_nonnull(md_rows, md_idx, col)
             if price:
-                return price
+                return price, "ok"
     except (ValueError, TypeError, IndexError, KeyError):
-        return None
+        return None, "not_found"
 
-    return None
+    return None, "not_found"
 
 
 def _get_securities_data(ticker, market):

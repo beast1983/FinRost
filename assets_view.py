@@ -10,6 +10,7 @@ from database import (
     credit_coupon_or_dividend, get_currencies, get_currency_id,
     get_ticker_name, get_ticker_info, search_ticker_names,
     update_ticker_name, update_ticker_from_moex,
+    get_disabled_tickers, set_ticker_disabled,
     get_drawdown_limit,
 )
 from datetime import datetime
@@ -73,6 +74,7 @@ class AssetsView(tb.Frame):
         self._refresh_cancel = threading.Event()
         self._refresh_queue = None
         self._refresh_in_progress = False
+        self._pending_selection = set()
         self._create_ui()
         self.bind('<Destroy>', lambda e: self._refresh_cancel.set(), add='+')
         self.refresh()
@@ -132,6 +134,8 @@ class AssetsView(tb.Frame):
         self.tree.tag_configure('cmp_down', background='#f2dede')  # упала — в убытке
         # Кандидат на продажу: жёлтая линия (заливка) + тёмно-красный текст
         self.tree.tag_configure('drawdown_alert', background='#FFF3B0', foreground='#8B0000')
+        # Заголовок группы (счёт/биржа) — серым, как шапка таблицы
+        self.tree.tag_configure('group_header', background='#d9d9d9', foreground='#333333')
 
         # Скроллбар
         scrollbar = tb.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -148,7 +152,13 @@ class AssetsView(tb.Frame):
         tb.Button(btn_frame, text="Продать", command=self._sell_asset, bootstyle="warning").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Купон/Дивиденд", command=self._credit, bootstyle="primary").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Изменить", command=self._edit_asset, bootstyle="info").pack(side=tk.LEFT, padx=2)
-        self._refresh_btn = tb.Button(btn_frame, text="Обновить цены", command=self._refresh_prices, bootstyle="info").pack(side=tk.LEFT, padx=2)
+        self._refresh_btn = tb.Button(btn_frame, text="Обновить цены", command=self._refresh_prices, bootstyle="info")
+        self._refresh_btn.pack(side=tk.LEFT, padx=2)
+        self.refresh_mode_var = tk.StringVar(value="Все цены")
+        self._refresh_mode_combo = tb.Combobox(btn_frame, textvariable=self.refresh_mode_var,
+                                               values=["Все цены", "Выделенные"],
+                                               state="readonly", width=13)
+        self._refresh_mode_combo.pack(side=tk.LEFT, padx=(0, 8))
         tb.Button(btn_frame, text="Сохранить срез", command=self._save_snapshot, bootstyle="primary").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Перечитать", command=self.refresh, bootstyle="info").pack(side=tk.LEFT, padx=2)
         tb.Button(btn_frame, text="Удалить", command=self._remove_asset, bootstyle="danger").pack(side=tk.LEFT, padx=2)
@@ -212,17 +222,36 @@ class AssetsView(tb.Frame):
         if self._refresh_in_progress:
             return
 
-        assets = get_all_assets(self.current_broker_id)
-        if not assets:
-            messagebox.showinfo("Информация", "Нет активов для обновления цен")
-            return
+        if self.refresh_mode_var.get() == "Выделенные":
+            assets = []
+            for item_id in self.tree.selection():
+                asset_id = self._extract_asset_id(self.tree.item(item_id))
+                if asset_id:
+                    asset = get_asset(asset_id)
+                    if asset:
+                        assets.append(asset)
+            if not assets:
+                messagebox.showwarning("Внимание", "Выберите актив(ы) для обновления цен")
+                return
+        else:
+            assets = get_all_assets(self.current_broker_id)
+            if not assets:
+                messagebox.showinfo("Информация", "Нет активов для обновления цен")
+                return
+
+        self._pending_selection = {
+            aid for aid in (
+                self._extract_asset_id(self.tree.item(item_id))
+                for item_id in self.tree.selection()
+            ) if aid
+        }
 
         self._refresh_in_progress = True
         self._refresh_queue = queue.Queue()
         self._refresh_cancel.clear()
 
         if self._refresh_btn:
-            self._refresh_btn.config(state=tb.DISABLED)
+            self._refresh_btn.config(state=tk.DISABLED)
         self.status_var.set("Подготовка обновления...")
 
         threading.Thread(
@@ -255,32 +284,63 @@ class AssetsView(tb.Frame):
             elif kind == "nointernet":
                 self.status_var.set("Нет интернета. Используются сохранённые цены.")
                 self.refresh()
+                self._restore_selection()
                 self._refresh_in_progress = False
                 if self._refresh_btn:
-                    self._refresh_btn.config(state=tb.NORMAL)
+                    self._refresh_btn.config(state=tk.NORMAL)
                 messagebox.showwarning("Нет интернета",
                     "Подключение к интернету отсутствует. Будут показаны последние сохранённые цены.")
                 return
             elif kind == "done":
-                success, not_found, failed = msg[1], msg[2], msg[3]
+                success, not_found, failed, skipped, auto_disabled, failed_names, not_found_names = (
+                    msg[1], msg[2], msg[3], msg[4], msg[5], msg[6], msg[7])
                 self.refresh()
+                self._restore_selection()
                 self._refresh_in_progress = False
                 if self._refresh_btn:
-                    self._refresh_btn.config(state=tb.NORMAL)
+                    self._refresh_btn.config(state=tk.NORMAL)
                 result_msg = f"Успешно: {success}"
                 if not_found > 0:
                     result_msg += f", не найдено: {not_found}"
+                    if auto_disabled > 0:
+                        result_msg += f" (выключено: {auto_disabled})"
+                if skipped > 0:
+                    result_msg += f", пропущено (выкл): {skipped}"
                 if failed > 0:
                     result_msg += f", ошибок: {failed}"
+                not_updated = not_found_names + failed_names
+                if not_updated:
+                    result_msg += "\n\nНе обновились:\n" + "\n".join(not_updated)
                 messagebox.showinfo("Результат", result_msg)
                 return
 
         self.after(100, self._poll_refresh_queue)
 
+    def _restore_selection(self):
+        """Восстановить выделение строк таблицы после пересборки."""
+        if not self._pending_selection:
+            return
+        try:
+            for item_id in self.tree.get_children():
+                asset_id = self._extract_asset_id(self.tree.item(item_id))
+                if asset_id in self._pending_selection:
+                    self.tree.selection_add(item_id)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _asset_label(asset):
+        """Подпись актива для списков результатов: «TICKER (Название)»."""
+        ticker = asset["ticker"]
+        name = asset["name"] if "name" in asset.keys() else None
+        return f"{ticker} ({name})" if name else str(ticker)
+
     def _refresh_worker(self, assets):
         """Фоновый поток: fetch + update_db (без tkinter-вызовов)."""
         total = len(assets)
-        success = failed = not_found = 0
+        success = failed = not_found = skipped = auto_disabled = 0
+        failed_names = []
+        not_found_names = []
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
@@ -291,6 +351,8 @@ class AssetsView(tb.Frame):
             self._refresh_queue.put(("nointernet",))
             return
 
+        disabled_set = get_disabled_tickers()
+
         for i, asset in enumerate(assets, 1):
             if self._refresh_cancel.is_set():
                 self._refresh_queue.put(("cancel",))
@@ -299,6 +361,13 @@ class AssetsView(tb.Frame):
             asset_id = asset["id"]
             ticker = asset["ticker"]
             asset_type = asset["asset_type"]
+
+            # Тикеры с флагом «Выкл» не запрашиваем (например, погашенные облигации)
+            if ticker in disabled_set:
+                skipped += 1
+                self._refresh_queue.put(("status",
+                    f"Обновление... {i} из {total} — {ticker}: пропущен (выкл)"))
+                continue
 
             try:
                 price, error = fetch_price(ticker, asset_type)
@@ -325,18 +394,33 @@ class AssetsView(tb.Frame):
                         update_asset_price(asset_id, price, now)
                     success += 1
                     _msg = f"{ticker}: {price:.2f} ✓"
-                else:
+                elif error == "network":
+                    failed += 1
+                    failed_names.append(self._asset_label(asset))
+                    _msg = f"{ticker}: нет связи с биржей"
+                elif error == "not_found":
                     not_found += 1
-                    _msg = f"{ticker}: не найдено на бирже"
+                    not_found_names.append(self._asset_label(asset))
+                    # Бумага снята с торгов — исключаем из дальнейших обновлений
+                    set_ticker_disabled(ticker, True)
+                    auto_disabled += 1
+                    _msg = f"{ticker}: не найдено на бирже — выключен"
+                else:
+                    failed += 1
+                    failed_names.append(self._asset_label(asset))
+                    _msg = f"{ticker}: ошибка - неизвестный тип актива"
 
             except Exception as e:
                 failed += 1
+                failed_names.append(self._asset_label(asset))
                 _msg = f"{ticker}: ошибка - {str(e)}"
 
             self._refresh_queue.put(("status",
                 f"Обновление... {i} из {total} — {_msg}"))
 
-        self._refresh_queue.put(("done", success, not_found, failed))
+        self._refresh_queue.put(
+            ("done", success, not_found, failed, skipped, auto_disabled,
+             failed_names, not_found_names))
 
     def _is_price_stale(self, last_update_str):
         """

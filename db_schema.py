@@ -2,7 +2,7 @@ import sqlite3
 from database import get_connection
 
 # Текущая версия схемы базы данных
-CURRENT_DB_VERSION = 5
+CURRENT_DB_VERSION = 6
 
 
 def init_schema():
@@ -151,7 +151,8 @@ def _create_all_tables(cursor):
             name TEXT NOT NULL DEFAULT '',
             asset_type TEXT NOT NULL DEFAULT '',
             lot_size REAL NOT NULL DEFAULT 1,
-            currency TEXT NOT NULL DEFAULT ''
+            currency TEXT NOT NULL DEFAULT '',
+            disabled INTEGER NOT NULL DEFAULT 0
         )
     """)
     # Миграция: заполнить из существующих активов
@@ -360,3 +361,14 @@ def _apply_migrations(cursor, current):
         cursor.execute("UPDATE db_version SET version = 5")
         current = 5
         print("[init_schema] Применена миграция до версии 5")
+
+    if current < 6:
+        # Флаг «Выкл» — тикер исключён из автополучения цен (например,
+        # облигация погашена и снята с торгов)
+        try:
+            cursor.execute("ALTER TABLE ticker_names ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует
+        cursor.execute("UPDATE db_version SET version = 6")
+        current = 6
+        print("[init_schema] Применена миграция до версии 6")

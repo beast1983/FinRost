@@ -9,6 +9,7 @@ import ttkbootstrap as tb
 from database import (
     get_connection, get_all_assets, update_asset_price, save_snapshot,
     get_latest_snapshot_month, _MONTH_NAMES, upsert_rate_history,
+    get_disabled_tickers, set_ticker_disabled,
 )
 from api_client import fetch_cbr_exchange_rates, fetch_price, is_connected
 
@@ -161,16 +162,26 @@ def _refresh_prices_with_progress(parent, status_var=None):
     result = {'done': False, 'success': 0, 'not_found': 0}
     msg_queue = queue.Queue()
 
+    disabled_set = get_disabled_tickers()
+
     def worker():
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         success = not_found = 0
         for asset in assets:
+            # Тикеры с флагом «Выкл» не запрашиваем (например, погашенные облигации)
+            if asset["ticker"] in disabled_set:
+                continue
             try:
                 price, error = fetch_price(asset["ticker"], asset["asset_type"])
                 if price is not None:
                     update_asset_price(asset["id"], price, now)
                     success += 1
                     msg_queue.put(("progress", asset["ticker"], price))
+                elif error == "not_found":
+                    # Бумага снята с торгов — исключаем из дальнейших обновлений
+                    set_ticker_disabled(asset["ticker"], True)
+                    not_found += 1
+                    msg_queue.put(("error", asset["ticker"]))
                 else:
                     not_found += 1
                     msg_queue.put(("error", asset["ticker"]))
