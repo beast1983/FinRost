@@ -83,8 +83,19 @@ class AssetsView(tb.Frame):
         self._refresh_in_progress = False
         self._pending_selection = set()
         self._create_ui()
-        self.bind('<Destroy>', lambda e: self._refresh_cancel.set(), add='+')
+        self.bind('<Destroy>', self._on_destroy, add='+')
         self.refresh()
+
+    def _on_destroy(self, event):
+        """Снять биндинги с окна приложения при закрытии вкладки."""
+        self._refresh_cancel.set()
+        if event.widget is not self:
+            return
+        try:
+            if getattr(self, '_top_key_bindid', None):
+                self._toplevel.unbind('<Key>', self._top_key_bindid)
+        except (tk.TclError, AttributeError):
+            pass
 
     def set_broker(self, broker_id):
         """Установить текущего выбранного брокера."""
@@ -92,6 +103,9 @@ class AssetsView(tb.Frame):
 
     def _create_ui(self):
         """Создание интерфейса."""
+        # Поисковый запрос фильтра — набирается прямо в таблице (см. _on_tree_key)
+        self.search_var = tk.StringVar()
+
         # Рамка таблицы
         table_frame = tb.Frame(self)
         table_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -184,6 +198,21 @@ class AssetsView(tb.Frame):
 
         # Привязываем двойной клик
         self.tree.bind('<Double-1>', lambda e: self._sell_asset())
+        # Клик по активу при включённом поиске — сбросить фильтр и перейти к активу
+        self.tree.bind('<ButtonRelease-1>', self._on_tree_click)
+
+        # Набор текста — живой фильтр. Вешаем на окно приложения, а не только
+        # на таблицу: фильтр срабатывает и когда фокус остался на кнопке меню.
+        self._toplevel = self.winfo_toplevel()
+        self._top_key_bindid = self._toplevel.bind('<Key>', self._on_tree_key, add='+')
+
+        # Плавающая подсказка с набираемым текстом (правый верхний угол таблицы)
+        self._search_hint = tk.Label(
+            table_frame, text="", font=('Arial', 9),
+            bg='#FFF9C4', fg='#333333',
+            relief='solid', borderwidth=1, padx=8, pady=2,
+        )
+        self.search_var.trace_add("write", lambda *_: self._on_search_changed())
 
     def _get_account_name(self, account_id):
         """Получить имя счёта по ID."""
@@ -214,6 +243,116 @@ class AssetsView(tb.Frame):
                 return int(t)
             except (ValueError, TypeError):
                 continue
+        return None
+
+    def _on_tree_click(self, event):
+        """Клик по активу при включённом поиске: сбросить фильтр и перейти к активу."""
+        # Клик по таблице — фокус клавиатуры должен быть на ней,
+        # иначе последующий набор текста не запустит фильтр
+        try:
+            self.tree.focus_set()
+        except tk.TclError:
+            pass
+        if not self.search_var.get().strip():
+            return
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+        asset_id = self._extract_asset_id(self.tree.item(item_id))
+        if not asset_id:
+            return  # заголовок группы или служебная строка
+        self.search_var.set("")  # сбрасывает фильтр (trace -> refresh)
+        self._focus_asset_row(asset_id)
+
+    def _on_search_return(self, event=None):
+        """Enter в поле поиска — выделить первое совпадение в таблице."""
+        for item_id in self.tree.get_children():
+            asset_id = self._extract_asset_id(self.tree.item(item_id))
+            if asset_id:
+                self._focus_asset_row(asset_id)
+                break
+
+    def _focus_asset_row(self, asset_id):
+        """Выделить строку актива и прокрутить таблицу к ней."""
+        for item_id in self.tree.get_children():
+            if self._extract_asset_id(self.tree.item(item_id)) == asset_id:
+                self.tree.selection_set(item_id)
+                self.tree.focus(item_id)
+                self.tree.see(item_id)
+                break
+
+    def _on_search_changed(self):
+        """Изменение запроса: показать/скрыть подсказку и обновить таблицу."""
+        try:
+            text = self.search_var.get()
+            if text:
+                self._search_hint.config(text=f"Поиск: {text}   Esc — сброс")
+                self._search_hint.place(in_=self.tree, relx=1.0, x=-16, y=3, anchor='ne')
+                self._search_hint.lift()
+            else:
+                self._search_hint.place_forget()
+        except tk.TclError:
+            return  # виджет уже удалён
+        self.refresh()
+
+    # Виджеты, где клавиатура нужна для ввода — фильтр там не перехватываем
+    _EDITABLE_CLASSES = {'Entry', 'TEntry', 'TCombobox', 'Combobox', 'Text',
+                         'Spinbox', 'TSpinbox', 'Listbox', 'TSpinbox'}
+
+    # Запасное сопоставление кириллических keysym -> символ (если event.char пуст)
+    _CYR_SUFFIX = {
+        'a': 'а', 'be': 'б', 've': 'в', 'ghe': 'г', 'de': 'д', 'ie': 'е',
+        'io': 'ё', 'zhe': 'ж', 'ze': 'з', 'i': 'и', 'short_i': 'й', 'ka': 'к',
+        'el': 'л', 'em': 'м', 'en': 'н', 'o': 'о', 'pe': 'п', 'er': 'р',
+        'es': 'с', 'te': 'т', 'u': 'у', 'ef': 'ф', 'ha': 'х', 'tse': 'ц',
+        'che': 'ч', 'sha': 'ш', 'shcha': 'щ', 'hardsign': 'ъ', 'yeru': 'ы',
+        'softsign': 'ь', 'e': 'э', 'yu': 'ю', 'ya': 'я',
+    }
+
+    def _on_tree_key(self, event):
+        """Набор текста: живой фильтр; BackSpace — стереть; Esc — сброс.
+
+        Enter выделяет первое совпадение. Стрелки, PgUp/PgDn и Ctrl-комбинации
+        не перехватываются — обычная навигация сохраняется.
+        Биндинг висит на окне приложения: событие приходит к виджету в фокусе,
+        поэтому поля ввода (счётчики, комбобоксы) пропускаем.
+        """
+        if event.state & 0x0004:  # только Ctrl (Alt может «залипать» после Alt+Tab)
+            return None
+        widget = event.widget
+        if widget is not self.tree:
+            try:
+                if widget.winfo_class() in self._EDITABLE_CLASSES:
+                    return None
+            except tk.TclError:
+                return None
+        keysym = event.keysym or ''
+        if keysym == 'Escape':
+            if self.search_var.get():
+                self.search_var.set("")
+                return 'break'
+            return None
+        if keysym == 'Return':
+            if self.search_var.get():
+                self._on_search_return()
+                return 'break'
+            return None
+        if keysym == 'BackSpace':
+            cur = self.search_var.get()
+            if cur:
+                self.search_var.set(cur[:-1])
+                return 'break'
+            return None
+        char = event.char or ''
+        if not char and keysym.startswith('Cyrillic_'):
+            # Запасной путь: Tk иногда отдаёт пустой %A при русской раскладке
+            name = keysym.split('_', 1)[1]
+            low = self._CYR_SUFFIX.get(name) or self._CYR_SUFFIX.get(name.lower())
+            if low:
+                char = low.upper() if name[:1].isupper() else low
+        if len(char) == 1 and char.isprintable():
+            self.search_var.set(self.search_var.get() + char)
+            return 'break'
         return None
 
     def _refresh_prices(self):
@@ -449,11 +588,23 @@ class AssetsView(tb.Frame):
         for item in children:
             self.tree.delete(item)
 
-        # Загрузка данных
-        assets = get_all_assets(self.current_broker_id)
-        
+        # Загрузка данных.
+        # При активном поиске — всегда по всем счетам (без учёта фильтра слева),
+        # совпадение по вхождению подстроки в название или тикер.
+        search_text = self.search_var.get().strip().lower()
+        if search_text:
+            assets = get_all_assets(None)
+            total_all = len(assets)
+            assets = [
+                a for a in assets
+                if search_text in (a["name"] or "").lower()
+                or search_text in (a["ticker"] or "").lower()
+            ]
+        else:
+            assets = get_all_assets(self.current_broker_id)
+
         if not assets:
-            self.status_var.set("Нет активов")
+            self.status_var.set("Ничего не найдено" if search_text else "Нет активов")
             return
 
         # Получаем курсы валют
@@ -644,7 +795,10 @@ class AssetsView(tb.Frame):
                     r["currency"]
                 ), tags=(str(r["id"]),) + r["cmp_tag"])
 
-        self.status_var.set(f"Всего активов: {len(assets)}")
+        if search_text:
+            self.status_var.set(f"Найдено: {len(assets)} из {total_all} (поиск по всем счетам)")
+        else:
+            self.status_var.set(f"Всего активов: {len(assets)}")
         apply_zebra(self.tree)
         reveal_row_colors(self.tree)
 
