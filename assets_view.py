@@ -63,6 +63,13 @@ def _bind_comma_to_dot(entry):
     entry.bind('<KeyRelease>', _fix_on_insert)
 
 
+def _center_dialog(dialog, width, height):
+    """Задать размер диалога и открыть его по центру экрана."""
+    x = (dialog.winfo_screenwidth() - width) // 2
+    y = (dialog.winfo_screenheight() - height) // 2
+    dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+
 class AssetsView(tb.Frame):
     """Вкладка управления активами."""
 
@@ -208,14 +215,6 @@ class AssetsView(tb.Frame):
             except (ValueError, TypeError):
                 continue
         return None
-
-    def _center_on_parent(self, dialog):
-        """Центрировать диалог над родительским окном."""
-        dialog.update_idletasks()
-        parent = self.master
-        x = parent.winfo_x() + (parent.winfo_width() - dialog.winfo_width()) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - dialog.winfo_height()) // 2
-        dialog.geometry(f"+{x}+{y}")
 
     def _refresh_prices(self):
         """Асинхронное обновление цен в фоновом потоке."""
@@ -681,10 +680,9 @@ class AssetsView(tb.Frame):
 
         dialog = tb.Toplevel(self.master)
         dialog.title(f"Редактировать {asset['ticker']}")
-        dialog.geometry("400x420")
+        _center_dialog(dialog, 400, 420)
         dialog.transient(self.master)
         dialog.grab_set()
-        self._center_on_parent(dialog)
 
 
         # Поля формы с предзаполленными данными
@@ -872,10 +870,9 @@ class AssetsView(tb.Frame):
 
         dialog = tb.Toplevel(self.master)
         dialog.title(f"Продать {ticker}")
-        dialog.geometry("420x400")
+        _center_dialog(dialog, 420, 400)
         dialog.transient(self.master)
         dialog.grab_set()
-        self._center_on_parent(dialog)
 
 
         # Информация
@@ -999,10 +996,9 @@ class AssetsView(tb.Frame):
 
         dialog = tb.Toplevel(self.master)
         dialog.title(f"Купон/Дивиденд: {ticker}")
-        dialog.geometry("380x430")
+        _center_dialog(dialog, 380, 430)
         dialog.transient(self.master)
         dialog.grab_set()
-        self._center_on_parent(dialog)
 
 
         # Информация об активе
@@ -1092,10 +1088,9 @@ class AssetsView(tb.Frame):
 
         dialog = tb.Toplevel(self.master)
         dialog.title("Купить актив")
-        dialog.geometry("520x380")
+        _center_dialog(dialog, 520, 380)
         dialog.transient(self.master)
         dialog.grab_set()
-        self._center_on_parent(dialog)
 
         # Account selector row
         acct_frame = tb.Frame(dialog, padding=10)

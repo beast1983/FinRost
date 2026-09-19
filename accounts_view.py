@@ -11,6 +11,7 @@ from database import (
 _TYPE_DISPLAY_TO_INTERNAL = {'Мос.Биржа': 'stock', 'Крипто биржа': 'crypto'}
 from datetime import datetime
 from calendar_utils import create_date_entry
+from calc_popup import attach_calc_button
 from table_utils import apply_zebra
 
 
@@ -65,6 +66,13 @@ def _format_currency(value, currency):
     """Форматировать значение с валютой."""
     symbols = {'RUB': '₽', 'USD': '$', 'EUR': '€', 'CNY': '¥'}
     return f"{value:,.2f} {symbols.get(currency, currency)}"
+
+
+def _center_dialog(dialog, width, height):
+    """Задать размер диалога и открыть его по центру экрана."""
+    x = (dialog.winfo_screenwidth() - width) // 2
+    y = (dialog.winfo_screenheight() - height) // 2
+    dialog.geometry(f"{width}x{height}+{x}+{y}")
 
 
 class AccountsView(tb.Frame):
@@ -187,7 +195,7 @@ class AccountsView(tb.Frame):
         """Открытие формы добавления счёта."""
         dialog = tb.Toplevel(self.master)
         dialog.title("Добавить счёт")
-        dialog.geometry("400x280")
+        _center_dialog(dialog, 400, 280)
         dialog.transient(self.master)
         dialog.grab_set()
 
@@ -228,6 +236,7 @@ class AccountsView(tb.Frame):
         balance_entry.grid(row=row, column=1, padx=10, pady=5)
         _bind_entry_context_menu(balance_entry)
         _bind_comma_to_dot(balance_entry)
+        attach_calc_button(dialog, balance_entry, row=row, column=2)
         row += 1
 
         def on_save():
@@ -271,7 +280,7 @@ class AccountsView(tb.Frame):
 
         dialog = tb.Toplevel(self.master)
         dialog.title(f"Редактировать: {account['name']}")
-        dialog.geometry("400x320")
+        _center_dialog(dialog, 400, 320)
         dialog.transient(self.master)
         dialog.grab_set()
 
@@ -315,6 +324,7 @@ class AccountsView(tb.Frame):
         balance_entry.grid(row=row, column=1, padx=10, pady=5)
         _bind_entry_context_menu(balance_entry)
         _bind_comma_to_dot(balance_entry)
+        attach_calc_button(dialog, balance_entry, row=row, column=2)
         row += 1
 
         tb.Label(dialog, text="Активен").grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
@@ -405,7 +415,7 @@ class AccountsView(tb.Frame):
         account = get_account(account_id)
         dialog = tb.Toplevel(self.master)
         dialog.title(f"Пополнение: {account['name']}")
-        dialog.geometry("350x280")
+        _center_dialog(dialog, 350, 290)
         dialog.transient(self.master)
         dialog.grab_set()
 
@@ -413,10 +423,13 @@ class AccountsView(tb.Frame):
 
         tb.Label(dialog, text="Сумма").pack(pady=5)
         amount_var = tk.StringVar()
-        amount_entry = tb.Entry(dialog, textvariable=amount_var)
-        amount_entry.pack(pady=5)
+        amount_row = tb.Frame(dialog)
+        amount_row.pack(pady=5)
+        amount_entry = tb.Entry(amount_row, textvariable=amount_var)
+        amount_entry.pack(side=tk.LEFT)
         _bind_entry_context_menu(amount_entry)
         _bind_comma_to_dot(amount_entry)
+        attach_calc_button(dialog, amount_entry, container=amount_row)
 
         tb.Label(dialog, text="Дата").pack(pady=5)
         date_entry = create_date_entry(dialog, initial_date=datetime.now().date(), width=28)
@@ -462,7 +475,7 @@ class AccountsView(tb.Frame):
         account = get_account(account_id)
         dialog = tb.Toplevel(self.master)
         dialog.title(f"Списание: {account['name']}")
-        dialog.geometry("350x300")
+        _center_dialog(dialog, 350, 320)
         dialog.transient(self.master)
         dialog.grab_set()
 
@@ -473,10 +486,13 @@ class AccountsView(tb.Frame):
 
         tb.Label(dialog, text="Сумма").pack(pady=5)
         amount_var = tk.StringVar()
-        amount_entry = tb.Entry(dialog, textvariable=amount_var)
-        amount_entry.pack(pady=5)
+        amount_row = tb.Frame(dialog)
+        amount_row.pack(pady=5)
+        amount_entry = tb.Entry(amount_row, textvariable=amount_var)
+        amount_entry.pack(side=tk.LEFT)
         _bind_entry_context_menu(amount_entry)
         _bind_comma_to_dot(amount_entry)
+        attach_calc_button(dialog, amount_entry, container=amount_row)
 
         tb.Label(dialog, text="Дата").pack(pady=5)
         date_entry = create_date_entry(dialog, initial_date=datetime.now().date(), width=28)
