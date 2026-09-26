@@ -11,7 +11,7 @@ from database import (
     get_ticker_name, get_ticker_info, search_ticker_names,
     update_ticker_name, update_ticker_from_moex,
     get_disabled_tickers, set_ticker_disabled,
-    get_drawdown_limit,
+    get_drawdown_settings,
 )
 from datetime import datetime
 from api_client import (
@@ -20,6 +20,30 @@ from api_client import (
 )
 from calendar_utils import create_date_entry
 from table_utils import apply_zebra, reveal_row_colors
+
+
+def _fmt_dd(value):
+    """Число лимита без лишних нулей: 20.0 → '20', 2.5 → '2.5'."""
+    return f"{value:g}"
+
+
+def _drawdown_label(dd):
+    """Подпись чекбокса сравнения: активные (ненулевые) лимиты по типам."""
+    stock_parts = []
+    if dd['dd_stock_pct'] > 0:
+        stock_parts.append(f"{_fmt_dd(dd['dd_stock_pct'])}%")
+    if dd['dd_stock_money'] > 0:
+        stock_parts.append(f"{_fmt_dd(dd['dd_stock_money'])}₽")
+    bond_parts = []
+    if dd['dd_bond_pct'] > 0:
+        bond_parts.append(f"{_fmt_dd(dd['dd_bond_pct'])}%")
+    if dd['dd_bond_money'] > 0:
+        bond_parts.append(f"{_fmt_dd(dd['dd_bond_money'])}₽")
+    if dd['dd_bond_critical'] > 0:
+        bond_parts.append(f"≤{_fmt_dd(dd['dd_bond_critical'])} ном.")
+    stock = " / ".join(stock_parts) or "—"
+    bond = " / ".join(bond_parts) or "—"
+    return f"Сравнение со средней (лимит: А {stock} / О {bond})"
 
 
 def _bind_entry_context_menu(widget):
@@ -187,7 +211,7 @@ class AssetsView(tb.Frame):
         # Переключатель сравнения текущей цены со средней ценой покупки
         self.compare_avg_var = tk.BooleanVar(value=True)
         tb.Checkbutton(
-            btn_frame, text=f"Сравнение со средней (лимит просадки: {get_drawdown_limit():.0f} %)",
+            btn_frame, text=_drawdown_label(get_drawdown_settings()),
             variable=self.compare_avg_var, command=self.refresh,
         ).pack(side=tk.LEFT, padx=8)
 
@@ -577,9 +601,44 @@ class AssetsView(tb.Frame):
         except (ValueError, TypeError):
             return True
 
+    def _is_drawdown_alert(self, asset, avg, curr, currency, rates):
+        """Проверить лимиты просадки: срабатывание любого включённого (>0) критерия.
+
+        Акции/ETF: падение % от цены покупки ИЛИ падение ₽ за одну бумагу
+        (в валюте цены, переведённой в рубли). Облигации: те же два ИЛИ
+        критическая цена — текущая цена (% номинала) ≤ заданной.
+        """
+        dd = self._dd
+        drop_pct = (avg - curr) / avg * 100.0
+        fx = 1.0
+        if currency == "USD":
+            fx = rates.get("USD", 90.0)
+        elif currency == "EUR":
+            fx = rates.get("EUR", 100.0)
+        elif currency == "CNY":
+            fx = rates.get("CNY", 12.0)
+
+        if asset["asset_type"] == "облигация":
+            if dd['dd_bond_pct'] > 0 and drop_pct >= dd['dd_bond_pct']:
+                return True
+            if dd['dd_bond_money'] > 0:
+                fv = asset["face_value"] or 1000
+                if (avg - curr) / 100.0 * fv * fx >= dd['dd_bond_money']:
+                    return True
+            if dd['dd_bond_critical'] > 0 and curr <= dd['dd_bond_critical']:
+                return True
+            return False
+
+        # Акции и ETF
+        if dd['dd_stock_pct'] > 0 and drop_pct >= dd['dd_stock_pct']:
+            return True
+        if dd['dd_stock_money'] > 0 and (avg - curr) * fx >= dd['dd_stock_money']:
+            return True
+        return False
+
     def refresh(self):
         """Обновление таблицы."""
-        self._drawdown_limit = get_drawdown_limit()
+        self._dd = get_drawdown_settings()
         try:
             children = self.tree.tk.call(self.tree._w, "children", "")
         except Exception:
@@ -726,15 +785,15 @@ class AssetsView(tb.Frame):
                 # Сравнение текущей цены со средней ценой покупки (доходность после покупки).
                 # Цены в одном масштабе (валюта бумаги; облигации — % от номинала),
                 # поэтому сравниваем напрямую. Зелёный — выросла, красный — упала.
-                # Порог в процентах; превышение лимита просадки → кандидат на продажу.
+                # Кандидат на продажу — срабатывание любого включённого лимита просадки.
                 cmp_tag = ()
                 if self.compare_avg_var.get():
                     avg = asset["avg_price"] or 0
                     curr = asset["current_price"] or 0
                     if avg > 0 and curr > 0:
                         diff_pct = (curr - avg) / avg * 100.0
-                        # 1) Кандидат на продажу — превышение лимита просадки
-                        if diff_pct <= -self._drawdown_limit:
+                        # 1) Кандидат на продажу — срабатывание лимита просадки
+                        if self._is_drawdown_alert(asset, avg, curr, currency, rates):
                             cmp_tag = ('drawdown_alert',)
                         # 2) Обычная подсветка роста/падения
                         elif diff_pct > 1.0:

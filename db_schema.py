@@ -2,7 +2,7 @@ import sqlite3
 from database import get_connection
 
 # Текущая версия схемы базы данных
-CURRENT_DB_VERSION = 6
+CURRENT_DB_VERSION = 7
 
 
 def init_schema():
@@ -372,3 +372,20 @@ def _apply_migrations(cursor, current):
         cursor.execute("UPDATE db_version SET version = 6")
         current = 6
         print("[init_schema] Применена миграция до версии 6")
+
+    if current < 7:
+        # Лимиты просадки: старый единый лимит drawdown_limit_pct →
+        # в % падения для акций (dd_stock_pct). Для облигаций % падения
+        # выключен (0), критическая цена номинала — из дефолта (80).
+        try:
+            cursor.execute("""
+                INSERT OR IGNORE INTO settings (setting_key, setting_value, updated_at)
+                SELECT 'dd_stock_pct', setting_value, updated_at
+                FROM settings WHERE setting_key = 'drawdown_limit_pct'
+            """)
+            cursor.execute("DELETE FROM settings WHERE setting_key = 'drawdown_limit_pct'")
+        except sqlite3.OperationalError:
+            pass
+        cursor.execute("UPDATE db_version SET version = 7")
+        current = 7
+        print("[init_schema] Применена миграция до версии 7")

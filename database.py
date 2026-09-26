@@ -1905,35 +1905,60 @@ def import_asset_slices(broker_id, year, asset_rows, balance_row=None, deposit_r
 #  Валютные курсы
 # ================================================================
 
-DEFAULT_DRAWDOWN_LIMIT = 20.0  # %
+# Лимиты просадки («кандидат на продажу»). 0 = критерий выключен.
+DRAWDOWN_DEFAULTS = {
+    'dd_stock_pct': 20.0,      # Акции: % падения от цены покупки
+    'dd_stock_money': 0.0,     # Акции: падение за одну бумагу, ₽
+    'dd_bond_pct': 0.0,        # Облигации: % падения от цены покупки
+    'dd_bond_money': 0.0,      # Облигации: падение за одну бумагу, ₽
+    'dd_bond_critical': 80.0,  # Облигации: критическая цена, % номинала
+}
+
+_DRAWDOWN_KEYS = tuple(DRAWDOWN_DEFAULTS.keys())
 
 
-def get_drawdown_limit():
-    """Вернуть лимит просадки в процентах (по умолчанию 20)."""
+def get_drawdown_settings():
+    """Вернуть лимиты просадки для акций и облигаций (0 = критерий выключен).
+
+    Миграция со старого единого лимита drawdown_limit_pct выполняется
+    в схеме БД (db_schema, версия 7) при старте приложения.
+    """
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT setting_value FROM settings WHERE setting_key = 'drawdown_limit_pct'")
-    row = cursor.fetchone()
-    conn.close()
-    if row:
+    placeholders = ', '.join('?' * len(_DRAWDOWN_KEYS))
+    cursor.execute(
+        f"SELECT setting_key, setting_value FROM settings WHERE setting_key IN ({placeholders})",
+        _DRAWDOWN_KEYS,
+    )
+    result = dict(DRAWDOWN_DEFAULTS)
+    for row in cursor.fetchall():
         try:
-            return float(row["setting_value"])
+            result[row["setting_key"]] = float(row["setting_value"])
         except (ValueError, TypeError):
-            pass
-    return DEFAULT_DRAWDOWN_LIMIT
+            continue
+    conn.close()
+    return result
 
 
-def set_drawdown_limit(value: float):
-    """Сохранить лимит просадки."""
+def set_drawdown_settings(stock_pct, stock_money, bond_pct, bond_money, bond_critical):
+    """Сохранить лимиты просадки (0 = критерий выключен)."""
+    values = {
+        'dd_stock_pct': stock_pct,
+        'dd_stock_money': stock_money,
+        'dd_bond_pct': bond_pct,
+        'dd_bond_money': bond_money,
+        'dd_bond_critical': bond_critical,
+    }
     today = datetime.now().strftime("%Y-%m-%d")
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("""
-            INSERT INTO settings (setting_key, setting_value, updated_at)
-            VALUES ('drawdown_limit_pct', ?, ?)
-            ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
-        """, (str(value), today, str(value), today))
+        for key, value in values.items():
+            cursor.execute("""
+                INSERT INTO settings (setting_key, setting_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?
+            """, (key, str(value), today, str(value), today))
         conn.commit()
     finally:
         conn.close()

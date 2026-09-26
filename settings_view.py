@@ -14,7 +14,7 @@ from database import (
     set_ticker_disabled, get_disabled_tickers,
     update_ticker_from_moex, convert_placeholder_tickers,
     get_db_path, backup_database,
-    get_drawdown_limit, set_drawdown_limit,
+    get_drawdown_settings, set_drawdown_settings,
     upsert_rate_history, get_rate_history, get_rate_history_years,
     _write_lock,
 )
@@ -143,34 +143,76 @@ class GeneralSettingsTab(tb.Frame):
     def __init__(self, parent, settings_view):
         super().__init__(parent)
         self.settings_view = settings_view
-        self.drawdown_limit_var = tk.StringVar(value="20.0")
+        self.dd_stock_pct_var = tk.StringVar(value="20")
+        self.dd_stock_money_var = tk.StringVar(value="0")
+        self.dd_bond_pct_var = tk.StringVar(value="0")
+        self.dd_bond_money_var = tk.StringVar(value="0")
+        self.dd_bond_critical_var = tk.StringVar(value="80")
         self.quik_broker_var = tk.StringVar()
         self._broker_map = {}
         self._create_ui()
-        self._load_drawdown_limit()
+        self._load_drawdown_settings()
         self._populate_brokers()
 
     def _create_ui(self):
-        # ─── Лимит просадки ───
-        limit_frame = tb.LabelFrame(self, text="Лимит просадки", padx=10, pady=10)
-        limit_frame.pack(fill=tk.X, padx=5, pady=5)
+        # ─── Лимиты просадки (акции / облигации) ───
+        dd_frame = tb.Frame(self)
+        dd_frame.pack(fill=tk.X, padx=5, pady=5)
+        dd_frame.columnconfigure(0, weight=1)
+        dd_frame.columnconfigure(1, weight=1)
+
+        stock_frame = tb.LabelFrame(dd_frame, text="Лимит просадки — Акции", padx=10, pady=10)
+        stock_frame.grid(row=0, column=0, sticky=tk.EW, padx=(0, 5))
 
         tb.Label(
-            limit_frame,
-            text="Максимальное падение цены актива от средней цены покупки,\n"
-                 "после которого он помечается как кандидат на продажу.",
+            stock_frame,
+            text="Подсветка «кандидата на продажу».\n0 — критерий выключен.",
             foreground="gray", justify=tk.LEFT,
         ).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
 
-        tb.Label(limit_frame, text="Порог, %:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        limit_entry = tb.Entry(limit_frame, textvariable=self.drawdown_limit_var, width=10)
-        limit_entry.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
-        _bind_entry_context_menu(limit_entry)
+        tb.Label(stock_frame, text="Падение от цены покупки, %:").grid(
+            row=1, column=0, sticky=tk.W, padx=5, pady=3)
+        stock_pct_entry = tb.Entry(stock_frame, textvariable=self.dd_stock_pct_var, width=10)
+        stock_pct_entry.grid(row=1, column=1, sticky=tk.E, padx=5, pady=3)
+        _bind_entry_context_menu(stock_pct_entry)
+
+        tb.Label(stock_frame, text="Падение за одну бумагу, ₽:").grid(
+            row=2, column=0, sticky=tk.W, padx=5, pady=3)
+        stock_money_entry = tb.Entry(stock_frame, textvariable=self.dd_stock_money_var, width=10)
+        stock_money_entry.grid(row=2, column=1, sticky=tk.E, padx=5, pady=3)
+        _bind_entry_context_menu(stock_money_entry)
+
+        bond_frame = tb.LabelFrame(dd_frame, text="Лимит просадки — Облигации", padx=10, pady=10)
+        bond_frame.grid(row=0, column=1, sticky=tk.EW, padx=(5, 0))
+
+        tb.Label(
+            bond_frame,
+            text="Подсветка «кандидата на продажу».\n0 — критерий выключен.",
+            foreground="gray", justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
+
+        tb.Label(bond_frame, text="Падение от цены покупки, %:").grid(
+            row=1, column=0, sticky=tk.W, padx=5, pady=3)
+        bond_pct_entry = tb.Entry(bond_frame, textvariable=self.dd_bond_pct_var, width=10)
+        bond_pct_entry.grid(row=1, column=1, sticky=tk.E, padx=5, pady=3)
+        _bind_entry_context_menu(bond_pct_entry)
+
+        tb.Label(bond_frame, text="Падение за одну бумагу, ₽:").grid(
+            row=2, column=0, sticky=tk.W, padx=5, pady=3)
+        bond_money_entry = tb.Entry(bond_frame, textvariable=self.dd_bond_money_var, width=10)
+        bond_money_entry.grid(row=2, column=1, sticky=tk.E, padx=5, pady=3)
+        _bind_entry_context_menu(bond_money_entry)
+
+        tb.Label(bond_frame, text="Критическая цена (≤ % номинала):").grid(
+            row=3, column=0, sticky=tk.W, padx=5, pady=3)
+        bond_critical_entry = tb.Entry(bond_frame, textvariable=self.dd_bond_critical_var, width=10)
+        bond_critical_entry.grid(row=3, column=1, sticky=tk.E, padx=5, pady=3)
+        _bind_entry_context_menu(bond_critical_entry)
 
         tb.Button(
-            limit_frame, text="Сохранить",
-            command=self._save_drawdown_limit, bootstyle="success",
-        ).grid(row=2, column=0, columnspan=2, pady=5)
+            dd_frame, text="Сохранить",
+            command=self._save_drawdown_settings, bootstyle="success",
+        ).grid(row=1, column=0, columnspan=2, pady=5)
 
         # ─── Импорт заявок QUIK ───
         quik_frame = tb.LabelFrame(self, text="Импорт заявок QUIK", padx=10, pady=10)
@@ -198,25 +240,39 @@ class GeneralSettingsTab(tb.Frame):
             quik_frame, text="Выбрать файл…", command=self._import_quik_orders, bootstyle="primary"
         ).grid(row=1, column=2, padx=5, pady=5)
 
-    def _load_drawdown_limit(self):
+    def _load_drawdown_settings(self):
         try:
-            val = get_drawdown_limit()
-            if val is not None:
-                self.drawdown_limit_var.set(str(val))
+            s = get_drawdown_settings()
+            self.dd_stock_pct_var.set(f"{s['dd_stock_pct']:g}")
+            self.dd_stock_money_var.set(f"{s['dd_stock_money']:g}")
+            self.dd_bond_pct_var.set(f"{s['dd_bond_pct']:g}")
+            self.dd_bond_money_var.set(f"{s['dd_bond_money']:g}")
+            self.dd_bond_critical_var.set(f"{s['dd_bond_critical']:g}")
         except Exception:
             pass
 
-    def _save_drawdown_limit(self):
-        try:
-            dd_val = float(self.drawdown_limit_var.get())
-            if not (0 <= dd_val <= 100):
-                messagebox.showerror("Ошибка", "Лимит просадки должен быть от 0 до 100")
+    def _save_drawdown_settings(self):
+        fields = [
+            ("Падение (акции), %", self.dd_stock_pct_var, 0, 100),
+            ("Падение (акции), ₽", self.dd_stock_money_var, 0, None),
+            ("Падение (облигации), %", self.dd_bond_pct_var, 0, 100),
+            ("Падение (облигации), ₽", self.dd_bond_money_var, 0, None),
+            ("Критическая цена (облигации), % номинала", self.dd_bond_critical_var, 0, 100),
+        ]
+        values = []
+        for title, var, lo, hi in fields:
+            val = _parse_number(var.get())
+            if val is None:
+                messagebox.showerror("Ошибка", f"Введите корректное значение: {title}")
                 return
-        except ValueError:
-            messagebox.showerror("Ошибка", "Введите корректный лимит просадки")
-            return
-        set_drawdown_limit(dd_val)
-        messagebox.showinfo("Сохранено", "Лимит просадки сохранён.")
+            if val < lo or (hi is not None and val > hi):
+                hi_str = hi if hi is not None else "∞"
+                messagebox.showerror("Ошибка", f"{title}: значение должно быть от {lo} до {hi_str}")
+                return
+            values.append(val)
+
+        set_drawdown_settings(*values)
+        messagebox.showinfo("Сохранено", "Лимиты просадки сохранены.")
 
     def _populate_brokers(self):
         self._broker_map = {}
