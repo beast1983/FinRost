@@ -2,6 +2,18 @@
 Клиент для получения текущих цен через API Московской биржи.
 """
 
+# Проверка сертификатов через системное хранилище (Windows).
+# MOEX с 2026 г. использует сертификат российского УЦ (Минцифры),
+# которого нет в наборе корней certifi, но он есть в системном
+# хранилище Windows. inject_into_ssl() нужно вызывать ДО импорта
+# requests/urllib3, чтобы SSL-контексты создавались уже с системным
+# хранилищем. Если truststore не установлен — работаем как раньше.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 import requests
 from requests.exceptions import ConnectionError, Timeout
 
